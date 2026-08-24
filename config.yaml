@@ -2,42 +2,45 @@
 
 # Book settings
 book:
-  title: "The Rise of Agentic AI"
+  # Title is taken from the seed prompt (story bible); this is only a fallback.
+  title: ""
+  # Chapters used when the seed has no outline and no -c flag is given.
   num_chapters: 5
-  output_format: "txt"  # txt, md, pdf
+  # Target chapter length; the writer is told 70%-130% of this value.
+  words_per_chapter: 2000
 
 # Ollama settings
 ollama:
   api_url: "http://localhost:11434"
-  model: "mistral"  # Options: mistral, llama3, deepseek
-  stream: false
-  timeout: 300  # seconds
+  model: "deepseek-v4-flash:cloud"        # options: mistral, llama3, deepseek, ...
+  timeout: 600            # seconds per request
+  retries: 2              # retries per request (with backoff)
 
-# Agent settings
+# Agent settings (temperature + enable/disable per agent)
 agents:
+  architect:
+    enabled: true         # builds the story bible from the seed
+    temperature: 0.7
+
   planner:
     enabled: true
     temperature: 0.7
-  
-  researcher:
+
+  researcher:             # lore briefs per chapter
     enabled: true
     temperature: 0.7
-  
+
   writer:
     enabled: true
-    temperature: 0.8
-  
+    temperature: 1.5
+
   editor:
-    enabled: true
-    temperature: 0.5
+    enabled: true         # if disabled, raw drafts are saved unedited
+    temperature: 0.4
 
 # Output settings
 output:
   directory: "output"
-  filename: "draft.txt"
-  overwrite: true
-
-# Logging
-logging:
-  level: "INFO"
-  file: "logs/book_writer.log"
+  filename: "draft.md"
+  overwrite: true         # false -> append -1, -2... instead of clobbering
+  interim: true           # write progress artifacts to <directory>/interim/

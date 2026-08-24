@@ -1,3 +1,2 @@
-requests==2.31.0
-ollama==0.1.32
-python-dotenv==1.0.0
+requests>=2.31.0
+PyYAML>=6.0

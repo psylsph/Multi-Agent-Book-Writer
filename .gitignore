@@ -1,4 +1,6 @@
 # Python
+tests/__pycache__/
+.pytest_cache/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -24,6 +26,7 @@ share/python-wheels/
 MANIFEST
 
 # Virtual environments
+.venv/
 venv/
 env/
 ENV/
@@ -39,7 +42,12 @@ venv.bak/
 .DS_Store
 
 # Project specific
-output/*.txt
+output/
 logs/
 *.log
 .env
+
+# Temporary files
+seed.md
+Modelfile
+

@@ -1,67 +1,76 @@
 # Multi-Agent Book Writer
 
-A collaborative AI book writing system using multiple specialized agents. Each agent has a specific role in the writing pipeline to create a complete, polished book draft.
+A collaborative AI book writing system using multiple specialized agents. Feed it a **seed prompt** — your premise, characters, world, tone, and (optionally) a chapter outline — and the agent team drafts a complete, polished book from it.
 
+<img src="/images/writer.gif" alt="writer demo" style="width:100%; height:auto;" />
 
-<img src="/images/writer.gif" alt="description" style="width:100%; height:auto;" />
 ## Project Overview
 
-This project simulates a writing team of AI agents that co-author a book. Each agent has a distinct role:
+The writing team consists of five agents:
 
-- **Planner**: Defines the book structure and chapters
-- **Researcher**: Gathers background information and supporting content
-- **Writer**: Drafts content for each chapter
-- **Editor**: Reviews and polishes the output for grammar and coherence
+- **Architect**: reads your seed prompt and distills it into a *story bible* (title, genre, tone, characters, world, constraints)
+- **Planner**: builds the chapter outline — **honoring your outline if you provided one**, only expanding it if you ask for more chapters
+- **Researcher (Lore Keeper)**: writes a per-chapter brief: which characters are on page, setting details, plot beats, continuity notes
+- **Writer**: drafts each chapter with continuity — it sees the story bible, the chapter brief, and a rolling summary of every previous chapter
+- **Editor**: polishes each chapter and checks it against the story bible (character names, world facts, constraints)
 
-The agents communicate through shared memory, enabling seamless collaboration.
+All agents share one context object; every LLM call goes through a single configured client with timeouts and retries.
 
 ## Tech Stack
 
 | Component | Tool/Library |
 |-----------|-------------|
-| LLMs | Ollama (mistral, llama3, deepseek) |
-| Agent Orchestration | Python classes with sequential pipeline |
-| Context Sharing | In-memory Python objects |
-| HTTP Client | requests library |
-| Configuration | YAML |
+| LLMs | Ollama (mistral, llama3, deepseek, ...) |
+| Agent Orchestration | Python functions in a sequential pipeline |
+| Context Sharing | In-memory shared dict |
+| HTTP Client | requests (with timeout + retry) |
+| Configuration | YAML (actually loaded and applied) |
 
 ## Project Structure
 
 ```
-multiagent-book-writer/
-├── main.py                 # Main pipeline orchestrator
-├── agents/                 # Agent implementations
-│   ├── planner.py         # Chapter planning agent
-│   ├── researcher.py      # Research gathering agent
-│   ├── writer.py          # Content writing agent
-│   └── editor.py          # Content editing agent
+multi-agent-book-writer/
+├── main.py                 # CLI entry point & pipeline orchestrator
+├── agents/
+│   ├── architect.py        # seed prompt -> story bible
+│   ├── planner.py          # chapter outline (JSON + seed-outline aware)
+│   ├── researcher.py       # per-chapter lore briefs
+│   ├── writer.py           # continuity-aware chapter drafts + summaries
+│   └── editor.py           # polish, consistency check, save
 ├── shared/
-│   └── context.py         # Shared state management
-├── output/
-│   └── draft.txt          # Final output (generated)
-├── config.yaml            # Configuration file
-├── requirements.txt       # Python dependencies
-└── README.md              # This file
+│   ├── context.py          # shared state (in-place reset)
+│   ├── ollama_client.py    # single LLM client: config, timeout, retries
+│   └── llm_utils.py        # JSON extraction / output cleanup helpers
+├── seeds/
+│   └── example_seed.md     # example seed prompt (a fantasy mystery)
+├── tests/
+│   ├── test_parsing.py     # unit tests for parsing helpers
+│   └── test_output.py      # unit tests for interim output helpers
+├── output/                 # generated books + interim progress artifacts
+├── config.yaml             # model, temperatures, timeouts, output settings
+├── requirements.txt
+└── README.md
 ```
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.9+
 - [Ollama](https://ollama.ai/) installed and running
 
 ### Setup Steps
 
-1. **Clone or download the project**
+1. **Clone the project**
    ```bash
-   cd c:\Users\Dell\Downloads\Multi-Agent Book Writer
+   git clone <this-repo>
+   cd Multi-Agent-Book-Writer
    ```
 
 2. **Pull an LLM model with Ollama**
    ```bash
    ollama pull mistral
-   # Alternative options: ollama pull llama3, ollama pull deepseek
+   # Alternatives: ollama pull llama3, ollama pull deepseek-r1
    ```
 
 3. **Start Ollama** (keep it running in a separate terminal)
@@ -76,98 +85,150 @@ multiagent-book-writer/
 
 ## Usage
 
-### Basic Execution
+### Write a book from a seed prompt
 
-Run the complete pipeline:
 ```bash
-python main.py
+python main.py --seed seeds/example_seed.md
+python main.py --prompt "A noir thriller set on Mars. Detective Rya Cole ... "
+python main.py --seed my_story.md --chapters 7 --model llama3 --out my_book.md
 ```
 
-Generate a book with a specific number of chapters:
+Run the bundled example seed with no preparation:
+
 ```bash
-python main.py 7
+python main.py            # uses seeds/example_seed.md
+python main.py --demo 2   # same, but only the first 2 chapters
 ```
 
-### Output
+### The seed prompt format
 
-The final book draft is saved to `output/draft.txt` with:
-- All chapters with proper formatting
-- Edited and polished content
-- Coherent flow and consistency
+Freeform text works, but a structured seed gives the best results. See
+[`seeds/SEED_SCHEMA.md`](seeds/SEED_SCHEMA.md) for the full schema (what is
+parsed verbatim vs. LLM-extracted) and
+[`seeds/example_seed.md`](seeds/example_seed.md) for a complete example:
+
+```markdown
+# My Book Title
+
+## Premise
+1-3 sentences: who wants what, and what stands in the way.
+
+## Characters
+- **Name** - role. Appearance, personality, motivation.
+
+## World
+Setting, rules (magic/tech), background the story depends on.
+
+## Tone & Style
+Point of view, pacing, atmosphere.
+
+## Constraints
+- Facts that must stay consistent (ages, dates, rules, names).
+
+## Outline            # optional - the planner will honor this directly
+- Chapter 1: Title - what happens
+- Chapter 2: Title - what happens
+```
+
+If the seed has no outline, the planner generates one from the story bible
+(config `book.num_chapters` or `-c N` controls the count). If the seed's
+outline has fewer chapters than you request, the planner expands it; if it has
+more, the first N are used (with a notice).
+
+### Chapter count priority
+
+1. `--chapters N` / positional `N` if given
+2. the number of chapters in the seed's own outline
+3. `book.num_chapters` from config.yaml (default 5)
 
 ## How It Works
 
 ### Pipeline Flow
 
-1. **Planning Phase**: Planner agent creates a structured outline with chapter titles and descriptions
-2. **Research Phase**: Researcher agent gathers background information, facts, and context for each chapter
-3. **Writing Phase**: Writer agent creates full chapter drafts based on research data
-4. **Editing Phase**: Editor agent polishes chapters for grammar, clarity, and coherence
-5. **Output**: Final draft is saved to `output/draft.txt`
+1. **Architect**: seed prompt → structured story bible (JSON, with a
+   no-LLM fallback that keeps the raw seed)
+2. **Planner**: seed outline (if any) or LLM-generated JSON outline, validated
+   and normalized
+3. **Researcher**: a lore brief per chapter, keyed by chapter number
+4. **Writer**: drafts each chapter from bible + brief + rolling summary of
+   previous chapters; generates a short summary after each for continuity
+5. **Editor**: polishes each chapter and fixes inconsistencies with the bible;
+   on any failure the unedited draft is kept (nothing is ever lost)
+6. **Save**: `output/draft.md` (created automatically) plus
+   `output/story_bible.md` for inspection
+
+### Interim output
+
+Every artifact is written to `output/interim/` the moment it is produced, so
+you can follow a run as it happens (the directory is cleared at the start of
+each run):
+
+```
+output/interim/
+├── story_bible.md        # as soon as the architect finishes
+├── outline.md            # as soon as the planner finishes
+├── lore_chapter_NN.md    # per-chapter briefs, one by one
+├── draft_chapter_NN.md   # each chapter draft, right after writing
+├── summaries.md          # rolling chapter summaries (rewritten per chapter)
+└── edited_chapter_NN.md  # each edited chapter
+```
+
+Disable with `output.interim: false` in config.yaml.
 
 ### Agent Communication
 
-All agents share a central `context` dictionary that includes:
-- `title`: Book title
-- `chapters`: List of chapter titles and descriptions
-- `research`: Dictionary of research data per chapter
-- `drafts`: List of chapter drafts
+All agents share a central `context` dict: `seed`, `title`, `bible`,
+`chapters`, `research`, `drafts`, `summaries`, `final`.
 
 ## Configuration
 
-Edit `config.yaml` to customize:
+`config.yaml` is actually loaded and applied:
 
-- **Book settings**: Title, number of chapters, output format
-- **Ollama settings**: API URL, model selection, timeout
-- **Agent parameters**: Temperature and behavior for each agent
-- **Output settings**: Directory and filename preferences
+- **book**: `num_chapters` (fallback), `words_per_chapter` (target length)
+- **ollama**: `api_url`, `model`, `timeout` (per request), `retries` (with backoff)
+- **agents**: per-agent `temperature` and `enabled` (disable `researcher`/`editor` to speed things up)
+- **output**: `directory`, `filename`, `overwrite` (`false` appends `-1`, `-2`, ... instead of clobbering), `interim` (progress artifacts under `<directory>/interim/`)
 
-## Examples
+CLI overrides: `--model`, `--out`, `--config`.
 
-### Run with 3 chapters:
+## Development
+
 ```bash
-python main.py 3
+pip install pytest
+python -m pytest tests/ -q
 ```
 
-### Check the output:
-```bash
-type output\draft.txt
-```
+The tests cover the pure parsing helpers (JSON extraction, LLM output cleanup,
+seed-outline extraction) — no model required.
 
 ## Troubleshooting
 
-### Connection Error to Ollama
-- Make sure Ollama is running: `ollama serve`
-- Verify it's accessible at `http://localhost:11434`
-- Check firewall settings
+### Connection error to Ollama
+The pipeline preflights Ollama at startup and exits with the available models
+listed if the configured model is missing. Make sure `ollama serve` is running.
 
-### Out of Memory
-- Try a smaller model: `ollama pull orca-mini`
-- Reduce chapter count: `python main.py 2`
+### Slow generation
+- Use `--chapters 2` for a quick test before a full run
+- Set `agents.researcher.enabled: false` and/or `agents.editor.enabled: false`
+- Use a smaller/faster model (`--model`, or `ollama pull orca-mini`)
 
-### Slow Generation
-- Check if Ollama is using GPU: `ollama list --all`
-- Consider using a smaller, faster model
+### Out of memory
+- Try a smaller model
+- Reduce chapter count
 
 ## Extensions & Improvements
 
-Potential enhancements to explore:
-
-- [ ] Add LangGraph for advanced orchestration with retries
-- [ ] Implement feedback loops for iterative refinement
-- [ ] Build Streamlit UI for real-time monitoring
-- [ ] Add PDF export functionality
-- [ ] Integrate with web search APIs for richer research
-- [ ] Add support for multiple LLMs
-- [ ] Implement memory persistence (JSON/database)
-- [ ] Add custom style guides for writing consistency
+- [ ] Parallelize per-chapter research/writing
+- [ ] Word-count enforcement / regeneration passes
+- [ ] Web search integration for research-grounded nonfiction
+- [ ] PDF/EPUB export
+- [ ] Streamlit UI for monitoring and editing seeds
+- [ ] Character-voice conditioning per POV chapter
 
 ## Requirements
 
-See `requirements.txt`:
-- `requests`: HTTP library for Ollama API calls
-- `ollama`: Ollama Python client library
-- `python-dotenv`: Environment variable management (optional)
+- `requests`: HTTP client for the Ollama API
+- `PyYAML`: config loading
 
 ## License
 
@@ -175,13 +236,8 @@ This project is open source and available for educational and commercial use.
 
 ## Notes
 
-- Ollama must be running locally for this project to work
-- Generated content quality depends on the selected LLM model
-- Generation time depends on model size and hardware capabilities
-- All content is generated in-memory before being written to disk
-
----
-
-**Getting Started**: Install dependencies, start Ollama, and run `python main.py` to generate your first AI-written book!
-
-
+- Ollama must be running locally (default `http://localhost:11434`)
+- Content quality depends on the selected model; a 7B model is fine for
+  structure but a larger model gives noticeably better prose
+- A full 5-chapter run is roughly 4N+2 LLM calls (~22) — expect several
+  minutes to an hour depending on hardware
