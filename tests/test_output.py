@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from shared.ollama_client import load_config
+from shared.llm_client import load_config
 from shared.output import (chapter_filename, clear_interim, format_bible_markdown,
                            interim_enabled, save_interim)
 

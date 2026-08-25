@@ -5,26 +5,31 @@ outline in - a polished draft out.
 
 ## Quick Setup (5 minutes)
 
-### 1. Install Ollama
-Download from https://ollama.ai
+### 1. Start an OpenAI-Compatible LLM Server
+The pipeline talks the OpenAI chat-completions API, so any compatible
+server works. Examples:
 
-### 2. Pull a Model
-```bash
-ollama pull mistral
+- **LM Studio** - start the local server (default `http://localhost:1234`)
+- **llama.cpp server** - `llama-server` (default `http://localhost:8080`)
+- **Ollama** - `ollama serve` (default `http://localhost:11434`;
+  the pipeline uses its OpenAI-compatible `/v1` API)
+- **Hosted APIs** - OpenAI, OpenRouter, etc. (set `llm.api_key` too)
+
+Then point `config.yaml` at it:
+
+```yaml
+llm:
+  base_url: "http://localhost:1234"  # /v1/chat/completions is appended
+  model: "mistral"                   # any model the server offers
+  api_key: ""                        # or "env:MY_VAR" for hosted APIs
 ```
 
-### 3. Start Ollama Server
-```bash
-ollama serve
-```
-Keep this terminal open!
-
-### 4. Install Dependencies
+### 2. Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### 5. Run the Project
+### 3. Run the Project
 ```bash
 python main.py                 # bundled example seed (fantasy mystery)
 python main.py --seed my.md    # your own seed prompt
@@ -88,16 +93,18 @@ the Planner generates an outline if you don't provide one.
 
 ## Troubleshooting
 
-**Error: could not connect to Ollama**
-- Make sure `ollama serve` is running in another terminal
+**Error: could not connect to the LLM server**
+- Make sure the server is running and `llm.base_url` in config.yaml is correct
+- If the server needs a key, set `llm.api_key` (or the `LLM_API_KEY` env var)
 
 **Slow generation**
 - Try 2 chapters first: `python main.py -c 2`
 - Disable editing in `config.yaml` (`agents.editor.enabled: false`)
-- Use a faster model: `--model orca-mini`
+- Use a faster model: `--model <name>`
 
 **Model not available**
-- The startup preflight lists your installed models; pull one with `ollama pull <name>`
+- The startup preflight lists the models your server offers; set `llm.model`
+  in config.yaml or pass `--model <name>`
 
 ## Output
 

@@ -18,7 +18,7 @@ from agents.researcher import run_researcher
 from agents.writer import run_writer
 from agents.editor import run_editor, save_book
 from shared.context import get_context, reset_context
-from shared.ollama_client import get_config, load_config, preflight
+from shared.llm_client import get_config, load_config, preflight
 from shared.output import clear_interim, interim_dir, interim_enabled
 
 EXAMPLE_SEED = Path(__file__).resolve().parent / "seeds" / "example_seed.md"
@@ -160,7 +160,7 @@ def main():
                         help="use the bundled example seed")
     parser.add_argument("--config", default="config.yaml",
                         help="config file path (default: config.yaml)")
-    parser.add_argument("--model", help="override the Ollama model")
+    parser.add_argument("--model", help="override the LLM model")
     parser.add_argument("--out", dest="out_file",
                         help="override the output filename "
                              "(written under the configured output dir)")
@@ -174,11 +174,11 @@ def main():
     except FileNotFoundError as e:
         sys.exit(f"Error: {e}")
     if args.model:
-        cfg["ollama"]["model"] = args.model
+        cfg["llm"]["model"] = args.model
     if args.out_file:
         cfg["output"]["filename"] = args.out_file
 
-    # Make sure Ollama is up and the model exists before doing any work
+    # Make sure the LLM endpoint is up and the model exists before any work
     try:
         preflight()
     except (ConnectionError, RuntimeError) as e:

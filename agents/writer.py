@@ -9,7 +9,7 @@ story state (chronology) used by every later continuity check.
 
 from shared.context import context, update_context
 from shared.llm_utils import clean_llm_text, extract_json, render_bible
-from shared.ollama_client import generate, get_config
+from shared.llm_client import generate, get_config
 from shared.output import chapter_filename, save_interim
 from shared.story_state import (merge_states, minimal_state, normalize_state,
                                 render_story_facts)
@@ -90,7 +90,8 @@ def run_writer():
     print("[WRITER] Starting writing phase...")
     cfg = get_config()
     words = int(cfg["book"].get("words_per_chapter", 800))
-    min_words, max_words = int(words * 0.7), int(words * 1.3)
+    tolerance = float(cfg["book"].get("word_count_tolerance", 0.8))
+    min_words, max_words = int(words * tolerance), int(words * 1.2)
 
     chapters = context.get("chapters", [])
     research = context.get("research", {})
@@ -131,7 +132,9 @@ STORY SO FAR (previous chapters):
 {story_so_far}
 
 Requirements:
-- Write {min_words}-{max_words} words of continuous narrative prose.
+- Write {min_words}-{max_words} words of continuous narrative prose. Length
+  is enforced after drafting: chapters below {min_words} words are sent back
+  for substantive expansion (not padding), so write fully from the start.
 - Show, don't tell. Use dialogue where it brings characters to life.
 - Keep character names, relationships, and world facts EXACTLY consistent
   with the bible and the STORY FACTS above.

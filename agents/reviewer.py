@@ -8,7 +8,7 @@ agent feeds the findings into bounded revision rounds.
 
 from shared.context import context
 from shared.llm_utils import extract_json, render_bible
-from shared.ollama_client import generate
+from shared.llm_client import generate
 from shared.output import chapter_filename, save_interim
 from shared.story_state import merge_states, render_story_facts
 

@@ -6,13 +6,15 @@ human-readable copy of the story bible to the output directory.
 """
 
 from pathlib import Path
+import re
 
 from shared.context import context, update_context
 from shared.llm_utils import clean_llm_text, render_bible
-from shared.ollama_client import get_config, generate
+from shared.llm_client import get_config, generate
 from shared.output import chapter_filename, format_bible_markdown, save_interim
 from shared.consistency import (check_chronology, format_findings,
-                                lint_book, lint_chapter)
+                                lint_book, lint_chapter, word_count,
+                                word_count_finding)
 from shared.story_state import merge_states
 from agents.reviewer import run_reviewer
 
@@ -35,16 +37,34 @@ def _bible_reference(bible):
 
 def _revise(number, title, draft, lint, issues):
     """Ask the model to fix specific findings in a draft."""
+def _revise(number, title, draft, lint, issues):
+    """Ask the model to fix specific findings in a draft."""
+    length_note = ""
+    wc = next((f for f in lint if f["check"] == "word_count"), None)
+    if wc:
+        current = word_count(draft)
+        m = re.search(r"minimum is (\d+)", wc["detail"])
+        minimum = int(m.group(1)) if m else 0
+        delta = max(minimum - current, 200)
+        length_note = f"""
+LENGTH - HARD REQUIREMENT: the draft is {current} words; the minimum is
+{minimum}. You MUST return at least {minimum} words (add at least {delta} new
+words). Models tend to mirror the input length - do not. Write every beat out
+in full scene: dialogue exchanges with back-and-forth, actions in sequence,
+senses on the page. If a paragraph summarises what happened, dramatise it
+instead. Do NOT pad: no repetition in different words, no filler modifiers,
+no restating what the reader knows, no throat-clearing. Every new sentence
+must add information, character, or momentum."""
     prompt = f"""You are revising Chapter {number} ("{title}") to fix specific, verified findings.
 
 FINDINGS TO FIX
 {format_findings(lint, issues)}
-
+{length_note}
 Rules:
 - Fix ONLY the listed findings. Do not rewrite style, add scenes, or change plot beyond the fixes.
 - For banned words, replace them naturally; for quotas, cut the least-needed instances down to the limit.
 - For continuity findings, apply the suggested fix or an equivalent minimal change.
-- Keep the chapter's voice, length, and all unaffected content intact.
+- Keep the chapter's voice and all unaffected content intact.
 
 CHAPTER (current draft):
 \"\"\"{draft}\"\"\"
@@ -75,6 +95,10 @@ def run_editor():
     chronology = context.get("chronology") or {}
     constraints = bible.get("constraints") or []
     max_rounds = int(cfg["book"].get("revision_rounds", 2))
+    target_words = int(cfg["book"].get("words_per_chapter", 800))
+    tolerance = float(cfg["book"].get("word_count_tolerance", 0.8))
+    min_words = int(target_words * tolerance)
+    max_wc_rounds = int(cfg["book"].get("extra_length_rounds", 2))
     reviewer_on = cfg.get("agents", {}).get("reviewer", {}).get("enabled", True)
     reference = _bible_reference(bible)
 
@@ -92,10 +116,17 @@ def run_editor():
             findings = lint_chapter(n, text, bible, constraints)
             findings += check_chronology(
                 n, text, merge_states(chronology, upto=n))
+            wc_find = word_count_finding(text, target_words, tolerance)
+            if wc_find:
+                findings.append(wc_find)
             return findings
+
+        print(f"[EDITOR] Chapter {n}: {word_count(draft)} words "
+              f"(target {target_words}, min {min_words})")
 
         # ---- review & revise rounds
         lint = full_lint(draft)
+        last_wc_expansion = [word_count(draft)]
         verdict, issues = ("pass", [])
         if reviewer_on:
             print(f"[REVIEWER] Reviewing chapter {n}...")
@@ -106,10 +137,24 @@ def run_editor():
             print(f"[REVIEWER] disabled; deterministic lint only "
                   f"({len(lint)} findings)")
 
-        for rnd in range(1, max_rounds + 1):
+        for rnd in range(1, max_rounds + max_wc_rounds + 1):
             if not lint and verdict == "pass":
                 break
-            print(f"[EDITOR] Revision round {rnd}/{max_rounds} for chapter "
+            needs_length = any(f["check"] == "word_count" for f in lint)
+            if rnd > max_rounds and not needs_length:
+                break  # extra rounds are reserved for length expansion
+            if rnd > max_rounds:
+                # keep expanding only while the revision is still growing
+                wc_now = word_count(draft)
+                growth = (wc_now - last_wc_expansion[0]) \
+                    / max(last_wc_expansion[0], 1)
+                if rnd > max_rounds + 1 and growth < 0.15:
+                    print(f"[EDITOR] Chapter {n}: expansion stalled at "
+                          f"{wc_now} words; accepting.")
+                    break
+                last_wc_expansion[0] = wc_now
+            print(f"[EDITOR] Revision round {rnd}/"
+                  f"{max_rounds + max_wc_rounds} for chapter "
                   f"{n}: {len(lint)} lint, {len(issues)} review issues")
             try:
                 revised = _revise(n, title, draft, lint, issues)
@@ -172,14 +217,35 @@ Return ONLY the edited chapter, starting with its original heading."""
 
 def _write_lint_report(final_chapters):
     """Final deterministic lint report across the whole book."""
+    cfg = get_config()
     bible = context.get("bible") or {}
     constraints = bible.get("constraints") or []
+    target_words = int(cfg["book"].get("words_per_chapter", 800))
+    tolerance = float(cfg["book"].get("word_count_tolerance", 0.8))
+    min_words = int(target_words * tolerance)
     full_text = "\n\n".join(final_chapters)
     findings = lint_book(full_text, bible, constraints)
 
+    # per-chapter word counts (wc -w semantics)
+    chapters = context.get("chapters", [])
+    counts = []
+    for ch in chapters:
+        match = next((c for c in final_chapters
+                      if c.startswith(f"## Chapter {ch['number']}:")), None)
+        if match:
+            body = match.split("\n\n", 1)[1] if "\n\n" in match else match
+            wc = word_count(body)
+            flag = " **SHORT**" if wc < min_words else ""
+            counts.append(f"- Chapter {ch['number']}: {wc} words{flag} "
+                          f"(min {min_words})")
+
     lines = ["# Lint Report (final book)", "",
              f"Chapters: {len(final_chapters)}  "
-             f"Words: {len(full_text.split())}", ""]
+             f"Words: {word_count(full_text)}  "
+             f"Target/chapter: {target_words} (min {min_words})", "",
+             "## Chapter word counts", ""]
+    lines += counts or ["(none)"]
+    lines += ["", "## Findings", ""]
     if not findings:
         lines.append("No deterministic findings. "
                      "(LLM continuity reviews are in review_chapter_NN.md)")

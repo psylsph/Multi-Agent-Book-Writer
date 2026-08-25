@@ -7,7 +7,7 @@ Fiction-oriented replacement for the old "statistics and quotes" researcher.
 
 from shared.context import context, update_context
 from shared.llm_utils import render_bible
-from shared.ollama_client import generate
+from shared.llm_client import generate
 from shared.output import chapter_filename, save_interim
 
 

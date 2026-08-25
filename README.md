@@ -21,7 +21,7 @@ All agents share one context object; every LLM call goes through a single config
 
 | Component | Tool/Library |
 |-----------|-------------|
-| LLMs | Ollama (mistral, llama3, deepseek, ...) |
+| LLMs | Any OpenAI-compatible endpoint (LM Studio, llama.cpp server, vLLM, Ollama, OpenAI, OpenRouter, ...) |
 | Agent Orchestration | Python functions in a sequential pipeline |
 | Context Sharing | In-memory shared dict |
 | HTTP Client | requests (with timeout + retry) |
@@ -41,7 +41,7 @@ multi-agent-book-writer/
 │   └── editor.py           # lint -> review -> revise loop, polish, save
 ├── shared/
 │   ├── context.py          # shared state (in-place reset)
-│   ├── ollama_client.py    # single LLM client: config, timeout, retries
+│   ├── llm_client.py      # single LLM client: config, timeout, retries
 │   ├── llm_utils.py        # JSON extraction / output cleanup helpers
 │   ├── story_state.py      # chronology: merge/render story facts
 │   ├── consistency.py      # deterministic lint: bans, quotas, timeline
@@ -61,7 +61,8 @@ multi-agent-book-writer/
 ### Prerequisites
 
 - Python 3.9+
-- [Ollama](https://ollama.ai/) installed and running
+- An OpenAI-compatible LLM server (LM Studio, llama.cpp server, vLLM,
+  Ollama, OpenAI, OpenRouter, ...) reachable over HTTP
 
 ### Setup Steps
 
@@ -71,18 +72,21 @@ multi-agent-book-writer/
    cd Multi-Agent-Book-Writer
    ```
 
-2. **Pull an LLM model with Ollama**
-   ```bash
-   ollama pull mistral
-   # Alternatives: ollama pull llama3, ollama pull deepseek-r1
-   ```
+2. **Point it at your LLM server**
 
-3. **Start Ollama** (keep it running in a separate terminal)
-   ```bash
-   ollama serve
-   ```
+   Edit `config.yaml` and set `llm.base_url` to your server (the
+   OpenAI-compatible `/v1/chat/completions` path is appended automatically).
+   Set `llm.model` to a model the server offers, and `llm.api_key` if the
+   server requires one (`env:MY_VAR` reads it from an environment variable;
+   `LLM_API_KEY` is the fallback).
 
-4. **Install Python dependencies**
+   Examples:
+   - LM Studio / llama.cpp server: `base_url: "http://localhost:1234"`
+   - Ollama: `base_url: "http://localhost:11434"` (its `/v1` API is used)
+   - OpenAI: `base_url: "https://api.openai.com"`, `model: "gpt-4o"`, plus an API key
+   - OpenRouter: `base_url: "https://openrouter.ai"`, `model: "<vendor>/<model>"`, plus an API key
+
+3. **Install Python dependencies**
    ```bash
    pip install -r requirements.txt
    ```
@@ -159,13 +163,16 @@ more, the first N are used (with a notice).
    and a structured **story state** entry (time, location, who's present,
    first meetings, relationship changes, deaths, injuries, secrets revealed)
 5. **Reviewer + Editor**: per chapter, a deterministic lint (banned words,
-   countable quotas, name near-misses, dead characters acting alive,
-   stranger-language between characters who've met) plus an LLM continuity
-   review (relationship regression/leaps, knowledge and timeline errors) —
-   then bounded revision rounds until the findings are fixed, a final polish
-   pass, and a lint guard that keeps whichever version is cleaner
+   countable quotas, `wc -w` word count vs the configured minimum, name
+   near-misses, dead characters acting alive, stranger-language between
+   characters who've met) plus an LLM continuity review (relationship
+   regression/leaps, knowledge and timeline errors) — then bounded revision
+   rounds until the findings are fixed (extra rounds for length while the
+   chapter keeps growing ≥15% per round), a final polish pass, and a lint
+   guard that keeps whichever version is cleaner
 6. **Save**: `output/draft.md` (created automatically) plus
-   `output/story_bible.md` and `output/interim/lint_report.md`
+   `output/story_bible.md` and `output/interim/lint_report.md` (includes
+   per-chapter word counts with **SHORT** flags)
 
 ### Interim output
 
@@ -197,8 +204,8 @@ All agents share a central `context` dict: `seed`, `title`, `bible`,
 
 `config.yaml` is actually loaded and applied:
 
-- **book**: `num_chapters` (fallback), `words_per_chapter` (target length), `revision_rounds` (review/revise passes per chapter; 0 disables revision)
-- **ollama**: `api_url`, `model`, `timeout` (per request), `retries` (with backoff)
+- **book**: `num_chapters` (fallback), `words_per_chapter` (target length), `word_count_tolerance` (enforced minimum as a fraction of the target — short chapters are lint findings and get sent back for substantive expansion, never padding), `extra_length_rounds` (additional revision rounds granted for length only, while each round still adds ≥15%), `revision_rounds` (review/revise passes per chapter; 0 disables revision)
+- **llm**: `base_url`, `api_key` (`""`, plain value, or `env:VAR`; `LLM_API_KEY` env var is the fallback), `model`, `timeout` (per request), `retries` (with backoff)
 - **agents**: per-agent `temperature` and `enabled` (disable `researcher`/`reviewer`/`editor` to speed things up)
 - **output**: `directory`, `filename`, `overwrite` (`false` appends `-1`, `-2`, ... instead of clobbering), `interim` (progress artifacts under `<directory>/interim/`)
 
@@ -216,14 +223,16 @@ seed-outline extraction) — no model required.
 
 ## Troubleshooting
 
-### Connection error to Ollama
-The pipeline preflights Ollama at startup and exits with the available models
-listed if the configured model is missing. Make sure `ollama serve` is running.
+### Connection error to the LLM server
+The pipeline preflights the endpoint at startup and exits with the available
+models listed if the configured model is missing. Make sure the server is
+running and `llm.base_url` in config.yaml is correct (no trailing
+`/v1` — it is appended automatically).
 
 ### Slow generation
 - Use `--chapters 2` for a quick test before a full run
 - Set `agents.researcher.enabled: false` and/or `agents.editor.enabled: false`
-- Use a smaller/faster model (`--model`, or `ollama pull orca-mini`)
+- Use a smaller/faster model (`--model`)
 
 ### Out of memory
 - Try a smaller model
@@ -240,7 +249,7 @@ listed if the configured model is missing. Make sure `ollama serve` is running.
 
 ## Requirements
 
-- `requests`: HTTP client for the Ollama API
+- `requests`: HTTP client for the OpenAI-compatible chat API
 - `PyYAML`: config loading
 
 ## License
@@ -249,7 +258,8 @@ This project is open source and available for educational and commercial use.
 
 ## Notes
 
-- Ollama must be running locally (default `http://localhost:11434`)
+- Works with any OpenAI-compatible endpoint (`llm.base_url` in config.yaml;
+  default `http://localhost:11434`, i.e. a local Ollama server)
 - Content quality depends on the selected model; a 7B model is fine for
   structure but a larger model gives noticeably better prose
 - A full 5-chapter run is roughly 4N+2 LLM calls (~22) — expect several

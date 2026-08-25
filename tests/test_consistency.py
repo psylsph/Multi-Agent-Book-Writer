@@ -1,7 +1,7 @@
 """Unit tests for the deterministic consistency linter."""
 
 from shared.consistency import (extract_banned_words, extract_quotas,
-                                lint_chapter)
+                                lint_chapter, word_count, word_count_finding)
 
 USER_CONSTRAINTS = [
     'British English. Never the words "unhurried", "unrushed", or "exactly".',
@@ -62,9 +62,45 @@ def test_lint_chapter_name_near_miss():
                for f in findings)
 
 
+def test_lint_chapter_name_check_no_determiner_false_positives():
+    bible = {"characters": [{"name": "The Keeper"}]}  # 'The' as a name word
+    text = "These were the days. Those nights mattered. There it was."
+    findings = lint_chapter(1, text, bible, [])
+    assert not any(f["check"] == "name_mismatch" for f in findings)
+
+
 def test_book_scope_quota_not_flagged_per_chapter():
     bible = {"characters": []}
     text = "Her collarbone showed. Her collarbone again."
     findings = lint_chapter(1, text, bible, USER_CONSTRAINTS)
     # collarbone is a volume-level quota: not flagged per chapter
     assert not any("collarbone" in f["detail"] for f in findings)
+
+
+# ------------------------------------------------------ word count (wc -w)
+
+def test_word_count_matches_wc_semantics():
+    text = "One  two\tthree\n\nfour   five"  # runs of whitespace collapse
+    assert word_count(text) == 5
+    # wc -w equivalence on a paragraph with mixed whitespace
+    para = "The  quick brown\tfox.\nJumps over  the lazy dog."
+    assert word_count(para) == 9
+
+
+def test_word_count_finding_flags_short_chapter():
+    short = "word " * 1200                      # 1200 words
+    finding = word_count_finding(short, target_words=2000, tolerance=0.8)
+    assert finding is not None
+    assert finding["check"] == "word_count"
+    assert "1200 words" in finding["detail"]
+    assert "1600" in finding["detail"]           # minimum
+    assert "SUBSTANCE" in finding["detail"]      # anti-padding instruction
+
+
+def test_word_count_finding_passes_at_minimum():
+    ok = "word " * 1600                          # exactly at the minimum
+    assert word_count_finding(ok, 2000, 0.8) is None
+
+
+def test_word_count_finding_disabled_without_target():
+    assert word_count_finding("a few words", None, 0.8) is None

@@ -10,7 +10,7 @@ never breaks the pipeline.
 import shutil
 from pathlib import Path
 
-from shared.ollama_client import get_config
+from shared.llm_client import get_config
 
 
 def interim_enabled():

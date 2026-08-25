@@ -8,14 +8,23 @@ book:
   num_chapters: 5
   # Target chapter length; the writer is told 70%-130% of this value.
   words_per_chapter: 2000
+  # Enforced minimum as a fraction of words_per_chapter. Chapters below
+  # this are flagged by the lint and sent back for substantive expansion
+  # (never padding) during review/revision rounds.
+  word_count_tolerance: 0.8
+  # Extra revision rounds granted ONLY for length expansion (beyond
+  # revision_rounds), continuing while each round still adds >= 15%.
+  extra_length_rounds: 2
   # Review/revise rounds per chapter in the editor (lint + reviewer
   # findings are fixed; 0 disables revision).
   revision_rounds: 2
 
-# Ollama settings
-ollama:
-  api_url: "http://localhost:11434"
-  model: "deepseek-v4-flash:cloud"        # options: mistral, llama3, deepseek, ...
+# LLM settings (any OpenAI-compatible endpoint: LM Studio, llama.cpp
+# server, vLLM, Ollama's /v1 API, OpenAI, OpenRouter, ...)
+llm:
+  base_url: "http://192.168.1.225:1234"   # server base URL; /v1/chat/completions is appended
+  api_key: ""          # leave empty for local servers; 'env:MY_VAR' reads an env var (LLM_API_KEY is the fallback)
+  model: "human-like-mistral-nemo-instruct-2407"
   timeout: 600            # seconds per request
   retries: 2              # retries per request (with backoff)
 

@@ -7,7 +7,7 @@ structured story bible that every later agent uses for consistency.
 from shared.context import context, update_context
 from shared.llm_utils import (extract_json, extract_seed_characters,
                               extract_seed_extras)
-from shared.ollama_client import generate
+from shared.llm_client import generate
 from shared.output import format_bible_markdown, save_interim
 
 

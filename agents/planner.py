@@ -12,7 +12,7 @@ import re
 
 from shared.context import context, update_context
 from shared.llm_utils import extract_json, strip_code_fences
-from shared.ollama_client import generate, get_config
+from shared.llm_client import generate, get_config
 from shared.output import save_interim
 
 # "## Outline", "# Story Outline:", "Outline:" section headers

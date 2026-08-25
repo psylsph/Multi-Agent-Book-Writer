@@ -12,9 +12,10 @@ from difflib import SequenceMatcher
 
 # tokens that look like names but never are
 _NOT_NAMES = {
-    "The", "She", "He", "They", "It", "But", "And", "His", "Her", "When",
-    "What", "Then", "There", "This", "That", "Chapter", "Part", "Yes", "No",
-    "Wednesday", "Thursday", "Tuesday", "Morning", "Night", "Cedar", "Rooms",
+    "The", "These", "Those", "She", "He", "They", "It", "But", "And",
+    "His", "Her", "When", "What", "Then", "There", "This", "That",
+    "Chapter", "Part", "Yes", "No", "Wednesday", "Thursday", "Tuesday",
+    "Morning", "Night", "Cedar", "Rooms",
 }
 
 # words never allowed as 'banned words' when unquoted (from phrases like
@@ -190,6 +191,14 @@ def _name_findings(text, bible):
         if token in _NOT_NAMES or token in known:
             continue
         for name_word in known:
+            # require a shared prefix so determiners/plurals never match
+            prefix = 0
+            for a, b in zip(token.lower(), name_word.lower()):
+                if a != b:
+                    break
+                prefix += 1
+            if prefix < 3:
+                continue
             ratio = SequenceMatcher(None, token.lower(),
                                     name_word.lower()).ratio()
             if ratio >= 0.75:
@@ -200,6 +209,42 @@ def _name_findings(text, bible):
                 })
                 break
     return findings
+
+
+def word_count(text):
+    """Word count using `wc -w` semantics: maximal runs of non-whitespace
+    characters. str.split() with no arguments is exactly equivalent."""
+    return len(text.split())
+
+
+def word_count_finding(text, target_words, tolerance=0.8):
+    """Length check for one chapter against the configured target.
+
+    Args:
+        text: chapter body (no heading)
+        target_words: book.words_per_chapter from config
+        tolerance: acceptable fraction of the target (book.
+            word_count_tolerance); chapters below target*tolerance are
+            flagged as too short.
+
+    Returns a finding dict or None.
+    """
+    if not text or not target_words:
+        return None
+    minimum = int(target_words * tolerance)
+    count = word_count(text)
+    if count < minimum:
+        return {
+            "check": "word_count",
+            "detail": f"chapter is {count} words; minimum is {minimum} "
+                      f"({int(tolerance * 100)}% of the {target_words}-word "
+                      "target). Expand with SUBSTANCE - deepen existing "
+                      "scenes, add dialogue and specific detail, extend "
+                      "beats from the outline. Do NOT pad: no repetition, "
+                      "no filler adjectives, no summarised skim, no "
+                      "restating what the reader already knows.",
+        }
+    return None
 
 
 def lint_chapter(number, text, bible, constraints):
