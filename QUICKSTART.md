@@ -82,8 +82,9 @@ the Planner generates an outline if you don't provide one.
 1. **Architect** - seed prompt -> story bible
 2. **Planner** - chapter outline (honors yours)
 3. **Researcher** - per-chapter lore briefs
-4. **Writer** - drafts with continuity (sees all previous chapters' summaries)
-5. **Editor** - polish + consistency with the bible
+4. **Writer** - drafts with continuity (story facts + all previous summaries)
+5. **Reviewer** - continuity check (deaths, relationships, timeline)
+6. **Editor** - lint -> revise -> polish, with a final lint report
 
 ## Troubleshooting
 

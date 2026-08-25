@@ -106,9 +106,10 @@ def run_pipeline(seed_text, num_chapters=None):
         print("-" * 60)
         run_writer()
 
-        # Step 5: Edit + consistency check + save
+        # Step 5: Review, revise & polish (lint + reviewer + editor loop)
         if agent_enabled("editor"):
-            print("\n[PIPELINE] Step 5: Editor (polish & consistency)")
+            print("\n[PIPELINE] Step 5: Review & Edit "
+                  "(continuity, lint, revise, polish)")
             print("-" * 60)
             run_editor()
         else:

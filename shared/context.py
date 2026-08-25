@@ -13,6 +13,7 @@ DEFAULTS = {
     "research": {},    # chapter number -> lore brief
     "drafts": {},      # chapter number -> draft text
     "summaries": {},   # chapter number -> rolling plot summary
+    "chronology": {},  # chapter number -> structured story state
     "final": [],       # edited chapters in order
 }
 

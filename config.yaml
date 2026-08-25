@@ -8,6 +8,9 @@ book:
   num_chapters: 5
   # Target chapter length; the writer is told 70%-130% of this value.
   words_per_chapter: 2000
+  # Review/revise rounds per chapter in the editor (lint + reviewer
+  # findings are fixed; 0 disables revision).
+  revision_rounds: 2
 
 # Ollama settings
 ollama:
@@ -20,23 +23,27 @@ ollama:
 agents:
   architect:
     enabled: true         # builds the story bible from the seed
-    temperature: 0.7
+    temperature: 0.3
 
   planner:
     enabled: true
-    temperature: 0.7
+    temperature: 0.3
 
   researcher:             # lore briefs per chapter
     enabled: true
-    temperature: 0.7
+    temperature: 0.3
 
   writer:
     enabled: true
-    temperature: 1.5
+    temperature: 0.3
+
+  reviewer:
+    enabled: true
+    temperature: 0.3
 
   editor:
     enabled: true         # if disabled, raw drafts are saved unedited
-    temperature: 0.4
+    temperature: 0.3
 
 # Output settings
 output:

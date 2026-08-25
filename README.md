@@ -11,8 +11,9 @@ The writing team consists of five agents:
 - **Architect**: reads your seed prompt and distills it into a *story bible* (title, genre, tone, characters, world, constraints)
 - **Planner**: builds the chapter outline — **honoring your outline if you provided one**, only expanding it if you ask for more chapters
 - **Researcher (Lore Keeper)**: writes a per-chapter brief: which characters are on page, setting details, plot beats, continuity notes
-- **Writer**: drafts each chapter with continuity — it sees the story bible, the chapter brief, and a rolling summary of every previous chapter
-- **Editor**: polishes each chapter and checks it against the story bible (character names, world facts, constraints)
+- **Writer**: drafts each chapter with continuity — it sees the story bible, the chapter brief, a rolling summary, and structured **story facts** (who is alive, who has met whom, relationship states, timeline), and records a structured story state after each chapter
+- **Reviewer**: checks every draft against the story state for dead-character resurrection, relationship regression/leaps (characters acting like strangers after they've met or become lovers), knowledge errors, and timeline/setting contradictions
+- **Editor**: runs bounded revision rounds until deterministic lint + reviewer findings are fixed, then a final polish pass with a lint guard
 
 All agents share one context object; every LLM call goes through a single configured client with timeouts and retries.
 
@@ -35,17 +36,20 @@ multi-agent-book-writer/
 │   ├── architect.py        # seed prompt -> story bible
 │   ├── planner.py          # chapter outline (JSON + seed-outline aware)
 │   ├── researcher.py       # per-chapter lore briefs
-│   ├── writer.py           # continuity-aware chapter drafts + summaries
-│   └── editor.py           # polish, consistency check, save
+│   ├── writer.py           # continuity-aware drafts + story state
+│   ├── reviewer.py         # continuity review vs story state (JSON verdict)
+│   └── editor.py           # lint -> review -> revise loop, polish, save
 ├── shared/
 │   ├── context.py          # shared state (in-place reset)
 │   ├── ollama_client.py    # single LLM client: config, timeout, retries
-│   └── llm_utils.py        # JSON extraction / output cleanup helpers
+│   ├── llm_utils.py        # JSON extraction / output cleanup helpers
+│   ├── story_state.py      # chronology: merge/render story facts
+│   ├── consistency.py      # deterministic lint: bans, quotas, timeline
+│   └── output.py           # interim artifacts + bible formatting
 ├── seeds/
+│   ├── SEED_SCHEMA.md      # seed format reference
 │   └── example_seed.md     # example seed prompt (a fantasy mystery)
-├── tests/
-│   ├── test_parsing.py     # unit tests for parsing helpers
-│   └── test_output.py      # unit tests for interim output helpers
+├── tests/                  # 47 unit tests (no model needed)
 ├── output/                 # generated books + interim progress artifacts
 ├── config.yaml             # model, temperatures, timeouts, output settings
 ├── requirements.txt
@@ -150,12 +154,18 @@ more, the first N are used (with a notice).
 2. **Planner**: seed outline (if any) or LLM-generated JSON outline, validated
    and normalized
 3. **Researcher**: a lore brief per chapter, keyed by chapter number
-4. **Writer**: drafts each chapter from bible + brief + rolling summary of
-   previous chapters; generates a short summary after each for continuity
-5. **Editor**: polishes each chapter and fixes inconsistencies with the bible;
-   on any failure the unedited draft is kept (nothing is ever lost)
+4. **Writer**: drafts each chapter from bible + brief + story facts + rolling
+   summary; after each chapter one call produces both the next-chapter summary
+   and a structured **story state** entry (time, location, who's present,
+   first meetings, relationship changes, deaths, injuries, secrets revealed)
+5. **Reviewer + Editor**: per chapter, a deterministic lint (banned words,
+   countable quotas, name near-misses, dead characters acting alive,
+   stranger-language between characters who've met) plus an LLM continuity
+   review (relationship regression/leaps, knowledge and timeline errors) —
+   then bounded revision rounds until the findings are fixed, a final polish
+   pass, and a lint guard that keeps whichever version is cleaner
 6. **Save**: `output/draft.md` (created automatically) plus
-   `output/story_bible.md` for inspection
+   `output/story_bible.md` and `output/interim/lint_report.md`
 
 ### Interim output
 
@@ -170,7 +180,10 @@ output/interim/
 ├── lore_chapter_NN.md    # per-chapter briefs, one by one
 ├── draft_chapter_NN.md   # each chapter draft, right after writing
 ├── summaries.md          # rolling chapter summaries (rewritten per chapter)
-└── edited_chapter_NN.md  # each edited chapter
+├── story_state.md        # rolling chronology: meetings, deaths, relationships
+├── review_chapter_NN.md  # reviewer verdicts + issues per chapter
+├── edited_chapter_NN.md  # each edited chapter
+└── lint_report.md        # final deterministic lint across the book
 ```
 
 Disable with `output.interim: false` in config.yaml.
@@ -184,9 +197,9 @@ All agents share a central `context` dict: `seed`, `title`, `bible`,
 
 `config.yaml` is actually loaded and applied:
 
-- **book**: `num_chapters` (fallback), `words_per_chapter` (target length)
+- **book**: `num_chapters` (fallback), `words_per_chapter` (target length), `revision_rounds` (review/revise passes per chapter; 0 disables revision)
 - **ollama**: `api_url`, `model`, `timeout` (per request), `retries` (with backoff)
-- **agents**: per-agent `temperature` and `enabled` (disable `researcher`/`editor` to speed things up)
+- **agents**: per-agent `temperature` and `enabled` (disable `researcher`/`reviewer`/`editor` to speed things up)
 - **output**: `directory`, `filename`, `overwrite` (`false` appends `-1`, `-2`, ... instead of clobbering), `interim` (progress artifacts under `<directory>/interim/`)
 
 CLI overrides: `--model`, `--out`, `--config`.
