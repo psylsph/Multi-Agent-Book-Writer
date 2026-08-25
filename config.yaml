@@ -24,7 +24,7 @@ book:
 llm:
   base_url: "http://192.168.1.225:1234"   # server base URL; /v1/chat/completions is appended
   api_key: ""          # leave empty for local servers; 'env:MY_VAR' reads an env var (LLM_API_KEY is the fallback)
-  model: "human-like-mistral-nemo-instruct-2407"
+  model: "qwen3.5-9b-the-defiant-fable-uncensored-heretic-neo-imatrix-max-mtp"
   timeout: 600            # seconds per request
   retries: 2              # retries per request (with backoff)
 
@@ -32,27 +32,27 @@ llm:
 agents:
   architect:
     enabled: true         # builds the story bible from the seed
-    temperature: 0.3
+    temperature: 0.7
 
   planner:
     enabled: true
-    temperature: 0.3
+    temperature: 0.7
 
   researcher:             # lore briefs per chapter
     enabled: true
-    temperature: 0.3
+    temperature: 0.7
 
   writer:
     enabled: true
-    temperature: 0.3
+    temperature: 1.0
 
   reviewer:
     enabled: true
-    temperature: 0.3
+    temperature: 0.7
 
   editor:
     enabled: true         # if disabled, raw drafts are saved unedited
-    temperature: 0.3
+    temperature: 0.7
 
 # Output settings
 output:

@@ -13,7 +13,7 @@ import re
 from shared.context import context, update_context
 from shared.llm_utils import extract_json, strip_code_fences
 from shared.llm_client import generate, get_config
-from shared.output import save_interim
+from shared.output import save_interim, save_interim_json
 
 # "## Outline", "# Story Outline:", "Outline:" section headers
 _SECTION_HEADER_RE = re.compile(
@@ -298,6 +298,7 @@ def run_planner(num_chapters=None):
             return []
 
     update_context("chapters", chapters)
+    save_interim_json("outline.json", chapters)
     save_interim("outline.md", _outline_markdown(chapters))
     print(f"[PLANNER] Outline ready ({len(chapters)} chapters):")
     for ch in chapters:

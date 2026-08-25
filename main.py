@@ -17,9 +17,10 @@ from agents.planner import run_planner
 from agents.researcher import run_researcher
 from agents.writer import run_writer
 from agents.editor import run_editor, save_book
-from shared.context import get_context, reset_context
+from shared.context import get_context, reset_context, update_context
 from shared.llm_client import get_config, load_config, preflight
 from shared.output import clear_interim, interim_dir, interim_enabled
+from shared.resume import has_resume, load_state, summarize_for_log
 
 EXAMPLE_SEED = Path(__file__).resolve().parent / "seeds" / "example_seed.md"
 
@@ -62,7 +63,30 @@ def agent_enabled(name):
     return get_config().get("agents", {}).get(name, {}).get("enabled", True)
 
 
-def run_pipeline(seed_text, num_chapters=None):
+def _hydrate_resume(state):
+    """Push loaded resume state into the shared context."""
+    if state["bible"]:
+        update_context("bible", state["bible"])
+        update_context("title", state["bible"].get("title", ""))
+        update_context("seed", state["bible"].get("seed", ""))
+    if state["chapters"]:
+        update_context("chapters", state["chapters"])
+    if state["research"]:
+        update_context("research", state["research"])
+    if state["drafts"]:
+        update_context("drafts", state["drafts"])
+    if state["summaries"] is not None:
+        update_context("summaries", state["summaries"])
+    if state["chronology"] is not None:
+        update_context("chronology", state["chronology"])
+    if state["final"]:
+        update_context("final", [text for _, text in state["final"]])
+    if state["completed_chapters"]:
+        update_context("completed_chapters",
+                       set(state["completed_chapters"]))
+
+
+def run_pipeline(seed_text, num_chapters=None, resuming=False):
     """
     Execute the complete book writing pipeline.
 
@@ -75,11 +99,19 @@ def run_pipeline(seed_text, num_chapters=None):
     print("=" * 60)
 
     start_time = time.time()
-    reset_context()
-
-    if interim_enabled():
-        clear_interim()  # drop artifacts from previous runs
-        print(f"[PIPELINE] Interim artifacts will appear in {interim_dir()}/")
+    if resuming:
+        state = load_state()
+        reset_context()
+        _hydrate_resume(state)
+        print(f"[RESUME] Loaded {summarize_for_log(state)} from "
+              "output/interim/.")
+        if interim_enabled():
+            print(f"[PIPELINE] Interim artifacts: {interim_dir()}/")
+    else:
+        reset_context()
+        if interim_enabled():
+            clear_interim()  # drop artifacts from previous runs
+            print(f"[PIPELINE] Interim artifacts: {interim_dir()}/")
 
     try:
         # Step 1: Story bible from the seed prompt
@@ -164,6 +196,9 @@ def main():
     parser.add_argument("--out", dest="out_file",
                         help="override the output filename "
                              "(written under the configured output dir)")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="ignore any prior interim artifacts and restart "
+                             "from the seed prompt")
     args = parser.parse_args()
 
     num_chapters = args.chapters if args.chapters is not None else args.n
@@ -184,9 +219,10 @@ def main():
     except (ConnectionError, RuntimeError) as e:
         sys.exit(f"Error: {e}")
 
+    resuming = not args.no_resume and has_resume()
     seed_text = resolve_seed_text(args)
-
-    exit_code = run_pipeline(seed_text, num_chapters=num_chapters)
+    exit_code = run_pipeline(seed_text, num_chapters=num_chapters,
+                             resuming=resuming)
     if exit_code == 0:
         out = Path(cfg["output"]["directory"]) / cfg["output"]["filename"]
         print(f"\n\u2713 Book written! Check {out}")

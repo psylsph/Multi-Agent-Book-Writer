@@ -10,7 +10,7 @@ story state (chronology) used by every later continuity check.
 from shared.context import context, update_context
 from shared.llm_utils import clean_llm_text, extract_json, render_bible
 from shared.llm_client import generate, get_config
-from shared.output import chapter_filename, save_interim
+from shared.output import chapter_filename, save_interim, save_interim_json
 from shared.story_state import (merge_states, minimal_state, normalize_state,
                                 render_story_facts)
 
@@ -102,10 +102,16 @@ def run_writer():
         print("[WRITER] No chapters found in context. Skipping writing.")
         return
 
-    drafts, summaries, chronology = {}, {}, {}
+    drafts, summaries, chronology = (context.get("drafts", {}),
+                                    context.get("summaries", {}),
+                                    context.get("chronology", {}))
 
     for chapter in chapters:
         n, ch_title = chapter["number"], chapter["title"]
+        if drafts.get(n) and chronology.get(n):
+            print(f"[WRITER] Chapter {n}: already drafted; skipping.")
+            continue
+
         print(f"[WRITER] Writing chapter {n}/{len(chapters)}: {ch_title}")
 
         lore = research.get(n, "") or "(no lore brief available)"
@@ -161,9 +167,13 @@ Requirements:
 
         summaries[n], chronology[n] = _summarize_and_extract(n, ch_title,
                                                              draft)
+        update_context("summaries", summaries)
         update_context("chronology", chronology)
+        update_context("drafts", drafts)
         save_interim("summaries.md", _summaries_markdown(chapters, summaries))
         save_interim("story_state.md", _states_markdown(chronology))
+        save_interim_json("summaries.json", summaries)
+        save_interim_json("chronology.json", chronology)
 
     update_context("drafts", drafts)
     update_context("summaries", summaries)

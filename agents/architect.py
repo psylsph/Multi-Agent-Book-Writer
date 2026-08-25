@@ -8,7 +8,8 @@ from shared.context import context, update_context
 from shared.llm_utils import (extract_json, extract_seed_characters,
                               extract_seed_extras)
 from shared.llm_client import generate
-from shared.output import format_bible_markdown, save_interim
+from shared.output import (format_bible_markdown, save_interim,
+                           save_interim_json)
 
 
 def _fallback_title(seed_text):
@@ -130,5 +131,6 @@ Creative seed:
     update_context("bible", bible)
     update_context("title", bible["title"])
     update_context("seed", seed_text)
+    save_interim_json("bible.json", bible)
     save_interim("story_bible.md", format_bible_markdown(bible))
     return bible

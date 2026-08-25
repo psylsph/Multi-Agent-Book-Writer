@@ -24,9 +24,12 @@ def run_researcher():
         print("[RESEARCHER] No chapters found in context. Skipping research.")
         return
 
-    research_data = {}
+    research_data = dict(context.get("research", {}))
     for chapter in chapters:
         n, title = chapter["number"], chapter["title"]
+        if research_data.get(n):
+            print(f"[RESEARCHER] Chapter {n}: brief already exists; skipping.")
+            continue
         print(f"[RESEARCHER] Briefing chapter {n}/{len(chapters)}: {title}")
 
         prompt = f"""You are a story lore keeper preparing a writing brief for ONE chapter of a novel.

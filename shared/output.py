@@ -7,6 +7,7 @@ waiting for the final book. All interim writes are best-effort: a failure
 never breaks the pipeline.
 """
 
+import json
 import shutil
 from pathlib import Path
 
@@ -46,6 +47,16 @@ def save_interim(filename, text):
     except OSError as e:
         print(f"[INTERIM] Could not save {filename}: {e}")
         return None
+
+
+def save_interim_json(filename, obj):
+    """Write a Python object as pretty JSON to the interim directory."""
+    try:
+        text = json.dumps(obj, indent=2, ensure_ascii=False)
+    except (TypeError, ValueError) as e:
+        print(f"[INTERIM] Could not serialise {filename}: {e}")
+        return None
+    return save_interim(filename, text)
 
 
 def chapter_filename(prefix, number):

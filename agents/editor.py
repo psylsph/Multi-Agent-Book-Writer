@@ -102,12 +102,16 @@ def run_editor():
     reviewer_on = cfg.get("agents", {}).get("reviewer", {}).get("enabled", True)
     reference = _bible_reference(bible)
 
-    final = []
+    final = list(context.get("final", []))
+    completed = set(context.get("completed_chapters", set()))
     for chapter in chapters:
         n, title = chapter["number"], chapter["title"]
         draft = drafts.get(n)
         if not draft:
             print(f"[EDITOR] No draft for chapter {n}; skipping.")
+            continue
+        if n in completed:
+            print(f"[EDITOR] Chapter {n}: already edited; skipping.")
             continue
 
         print(f"[EDITOR] Chapter {n}/{len(chapters)}: review & edit")
@@ -208,11 +212,18 @@ Return ONLY the edited chapter, starting with its original heading."""
 
         final.append(edited)
         save_interim(chapter_filename("edited", n), edited)
+        completed.add(n)
+        update_context("completed_chapters", completed)
         print(f"[EDITOR] Chapter {n} complete.")
 
     update_context("final", final)
-    _write_lint_report(final)
-    return save_book(final)
+    return finalize_book(final)
+
+
+def finalize_book(final_chapters):
+    """Re-emit the lint report and the assembled book. Idempotent."""
+    _write_lint_report(final_chapters)
+    return save_book(final_chapters)
 
 
 def _write_lint_report(final_chapters):

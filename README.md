@@ -49,7 +49,7 @@ multi-agent-book-writer/
 ├── seeds/
 │   ├── SEED_SCHEMA.md      # seed format reference
 │   └── example_seed.md     # example seed prompt (a fantasy mystery)
-├── tests/                  # 47 unit tests (no model needed)
+├── tests/                  # 54 unit tests (no model needed)
 ├── output/                 # generated books + interim progress artifacts
 ├── config.yaml             # model, temperatures, timeouts, output settings
 ├── requirements.txt
@@ -149,6 +149,22 @@ more, the first N are used (with a notice).
 2. the number of chapters in the seed's own outline
 3. `book.num_chapters` from config.yaml (default 5)
 
+## Resume
+
+If the app or the LLM crashes mid-run, re-running it picks up where it left
+off rather than starting over. Each agent writes structured JSON snapshots
+(bible.json, outline.json, summaries.json, chronology.json) plus per-chapter
+text files; the next run loads them and skips already-completed work.
+
+- Architect: skipped once bible.json exists
+- Planner: skipped once outline.json exists
+- Researcher/Writer/Editor: per-chapter skip when the corresponding draft or
+  edited artifact is on disk
+
+The resume is automatic when `output/interim/bible.json` exists. Use
+`--no-resume` to force a clean restart (clears the interim directory and
+rebuilds everything from the seed).
+
 ## How It Works
 
 ### Pipeline Flow
@@ -190,7 +206,11 @@ output/interim/
 ├── story_state.md        # rolling chronology: meetings, deaths, relationships
 ├── review_chapter_NN.md  # reviewer verdicts + issues per chapter
 ├── edited_chapter_NN.md  # each edited chapter
-└── lint_report.md        # final deterministic lint across the book
+├── lint_report.md        # final deterministic lint across the book
+├── bible.json            # structured bible (resume)
+├── outline.json          # structured plan (resume)
+├── summaries.json        # rolling summaries (resume)
+└── chronology.json       # rolling story state (resume)
 ```
 
 Disable with `output.interim: false` in config.yaml.
