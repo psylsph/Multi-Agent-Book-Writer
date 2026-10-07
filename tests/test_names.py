@@ -118,12 +118,13 @@ def test_extractor_prompt_lists_the_bibles_names(tmp_path, monkeypatch):
     seen = {}
 
     def fake(prompt, **kwargs):
-        seen["prompt"] = prompt
-        return json.dumps({"summary": "s", "present": ["Elizabeth"],
+        seen.setdefault("prompt", prompt)      # the extraction prompt, not
+        return json.dumps({"summary": "s", "present": ["Elizabeth"],  # later
                            "events": [{"type": "death", "who": ["Elizabeth"]}]})
 
     monkeypatch.setattr(writer, "generate_with_wait", fake)
-    _, state = writer._summarize_and_extract(1, "One", "text")
+    _, state = writer._summarize_and_extract(
+        1, "One", "Elizabeth Hale was there when she died.")
     assert "Carole, Elizabeth Hale" in seen["prompt"]       # qualifier dropped
     assert state["present"] == ["Elizabeth Hale"]           # snapped
     assert context["bible"]["characters"][0]["name"].startswith("Carole")
@@ -237,6 +238,6 @@ def test_extractor_prompt_lists_aliases(tmp_path, monkeypatch):
         return json.dumps({"summary": "s", "present": ["Bunny"], "events": []})
 
     monkeypatch.setattr(writer, "generate_with_wait", fake)
-    _, state = writer._summarize_and_extract(1, "One", "text")
+    _, state = writer._summarize_and_extract(1, "One", "Bunny waved at Tom.")
     assert "Elizabeth (also called Bunny), Tom" in seen["prompt"]
     assert state["present"] == ["Elizabeth"]

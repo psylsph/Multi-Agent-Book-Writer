@@ -74,14 +74,32 @@ def _same_name_group(a, b):
     return a == b or any(a in g and b in g for g in NAME_GROUPS)
 
 
+# Titles that are not part of a name: "Dr Cole" is Anna Cole, "Miss Hale" is
+# Elizabeth Hale. Stripped before matching.
+TITLES = {"dr", "doctor", "mr", "mrs", "ms", "miss", "mx", "sir", "dame",
+          "lady", "lord", "captain", "capt", "professor", "prof", "father",
+          "fr", "rev", "reverend", "constable", "sergeant", "sgt",
+          "inspector", "officer", "madam", "master", "colonel", "major"}
+
+
+def strip_title(name):
+    """'Dr. Cole' -> 'Cole' (unchanged when the title is the whole name or
+    the name has no title)."""
+    words = str(name).strip().split()
+    while len(words) > 1 and words[0].lower().rstrip(".") in TITLES:
+        words.pop(0)
+    return " ".join(words)
+
+
 def canonical_name(name, canon, aliases=None):
     """Map an extracted name onto the bible's spelling when that is
     unambiguous: exact (any case), a first name, a surname, or the bible name
     plus extra words. Anything unmatched or ambiguous is returned unchanged,
     so a new character is never forced onto an existing one."""
-    name = str(name).strip()
+    original = str(name).strip()
+    name = strip_title(original)          # match without the title...
     if not name or not canon:
-        return name
+        return original
     for c in canon:
         if c.lower() == name.lower():
             return c
@@ -101,7 +119,33 @@ def canonical_name(name, canon, aliases=None):
         # a known nickname ('Liz' for 'Elizabeth'), only if it picks ONE person
         matches = [c for c in canon if nw and words(c)
                    and _same_name_group(nw[0], words(c)[0])]
-    return matches[0] if len(matches) == 1 else name
+    return matches[0] if len(matches) == 1 else original  # ...keep it if new
+
+
+def as_names(value):
+    """A clean list of names from whatever a model sent for a names field.
+
+    Models, small ones especially, are loose about types: `"who": "Tom"` or
+    `"who": "Tom and Liz"` instead of a list. Iterating that string would
+    create one single-letter "character" per letter, so a string is split on
+    commas, semicolons, '&', '+' and the word 'and'. List items may be strings
+    or {"name": ...} objects; anything else is ignored.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = re.split(r"\s*(?:,|;|&|\+|\band\b)\s*", value)
+    elif isinstance(value, dict):
+        value = [value]
+    elif not isinstance(value, (list, tuple, set)):
+        return []
+    names = []
+    for item in value:
+        if isinstance(item, dict):
+            item = item.get("name")
+        if isinstance(item, (str, int, float)) and str(item).strip():
+            names.append(str(item).strip())
+    return names
 
 
 def normalize_state(number, title, data, canon=None, aliases=None):
@@ -121,14 +165,14 @@ def normalize_state(number, title, data, canon=None, aliases=None):
         return out
 
     events = []
-    for ev in data.get("events") or []:
+    raw_events = data.get("events")
+    for ev in raw_events if isinstance(raw_events, list) else []:
         if not isinstance(ev, dict):
             continue
         etype = str(ev.get("type", "")).strip()
         if etype not in EVENT_TYPES:
             continue
-        who = fix(str(w).strip() for w in (ev.get("who") or [])
-                  if str(w).strip())
+        who = fix(as_names(ev.get("who")))
         if not who:
             continue
         events.append({"type": etype, "who": who,
@@ -139,8 +183,7 @@ def normalize_state(number, title, data, canon=None, aliases=None):
         "summary": str(data.get("summary", "")).strip(),
         "time": str(data.get("time", "")).strip(),
         "location": str(data.get("location", "")).strip(),
-        "present": fix(str(p).strip() for p in (data.get("present") or [])
-                       if str(p).strip()),
+        "present": fix(as_names(data.get("present"))),
         "events": events,
     }
 
@@ -194,7 +237,7 @@ def merge_states(chronology, upto=None):
             detail = ev.get("detail", "")
             if ev["type"] == "death":
                 for name in who:
-                    dead[name] = n
+                    dead.setdefault(name, n)   # the FIRST death chapter stands
             elif len(who) >= 2:
                 # any two-person event means they have met
                 register_met(who, n)

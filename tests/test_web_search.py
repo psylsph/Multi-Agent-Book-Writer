@@ -12,7 +12,7 @@ import yaml
 
 import main as pipeline
 from agents import researcher
-from shared import prompts, web_search
+from shared import llm_client, prompts, web_search
 from shared.context import context, reset_context, update_context
 from shared.llm_client import load_config
 
@@ -278,8 +278,9 @@ def _verdict(**kw):
 
 def _research_setup(tmp_path, monkeypatch, results=None, verdicts=None,
                     available=True, proposed=None, chapters=None,
-                    second=None):
-    out = _config(tmp_path)
+                    second=None, banned='["Aria Vance", "Willow Rooms"]'):
+    out = _config(tmp_path, "  enabled: true\n"
+                  f"  banned_terms: {banned}\n")
     update_context("chapters", chapters or [CHAPTER])
     update_context("bible", BIBLE)
     calls = []
@@ -290,8 +291,8 @@ def _research_setup(tmp_path, monkeypatch, results=None, verdicts=None,
             return json.dumps(PROPOSED if proposed is None else proposed)
         if "CLAIMS TO VERIFY" in prompt:
             return verdicts if verdicts is not None else _verdict()
-        if "Does this quote" in prompt:
-            return second if second is not None else '{"agrees": true}'
+        if "does this quote" in prompt:
+            return second if second is not None else '{"answer": true}'
         return "BRIEF TEXT"
 
     searched = []
@@ -447,16 +448,22 @@ def test_researcher_disabled_in_config_never_searches(tmp_path, monkeypatch):
     assert searched == []
 
 
-def test_researcher_never_searches_a_story_term(tmp_path, monkeypatch, capsys):
+def test_researcher_never_searches_a_banned_term(tmp_path, monkeypatch, capsys):
     _, _, searched = _research_setup(tmp_path, monkeypatch, proposed=[
         {"claim": "A clinic exists", "query": "Willow Rooms clinic location"},
         {"claim": "Paramedics triage", "query": "how paramedics triage"}])
-    update_context("bible", {**BIBLE, **WORLD_BIBLE,
-                             "characters": WORLD_BIBLE["characters"]})
     researcher.run_researcher()
     assert searched == ["how paramedics triage"]
-    assert "Dropped query 'Willow Rooms clinic location'" in \
-        capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Dropped query 'Willow Rooms clinic location'" in out
+    assert "banned term 'Willow Rooms'" in out
+
+
+def test_researcher_searches_anything_when_nothing_is_banned(tmp_path,
+                                                             monkeypatch):
+    _, _, searched = _research_setup(tmp_path, monkeypatch, banned="[]")
+    researcher.run_researcher()
+    assert searched == ["how hospital wards triage", "Aria Vance ward"]
 
 
 # ------------------------------------------- verification helpers (no LLM)
@@ -539,26 +546,19 @@ WORLD_BIBLE = {
 OUTLINE = [{"title": "The Fall", "summary": "Stuart falls near Hollowby."}]
 
 
-def test_story_terms_catch_invented_places_and_names():
-    terms = web_search.story_terms(WORLD_BIBLE, OUTLINE)
-    assert "Willow Rooms" in terms            # invented clinic (the real leak)
-    assert "Hollowby" in terms               # single-word invented place
-    assert "Stuart" in terms and "Carole" in terms
-    assert "Hampshire" in terms              # real, but blocked unless allowed
+def test_nothing_is_banned_by_default(monkeypatch):
+    assert web_search.banned_terms() == []
+    queries = ["Willow Rooms private clinic location", "Aria Vance"]
+    assert web_search.safe_queries(queries, web_search.banned_terms()) == queries
 
 
-def test_story_terms_ignore_ordinary_words_and_title_fragments():
-    terms = web_search.story_terms(WORLD_BIBLE, OUTLINE)
-    for noise in ("Calm", "Very", "Everyone", "Divorced", "Tolerant", "No",
-                  "from", "12", "The Fall"):
-        assert noise not in terms, noise
-
-
-def test_story_terms_allow_list_exempts_real_places():
-    terms = web_search.story_terms(WORLD_BIBLE, OUTLINE, allow=["hampshire"])
-    assert "Hampshire" not in terms and "Willow Rooms" in terms
-    q = "building regulations for barn conversions in Hampshire"
-    assert web_search.blocked_term(q, terms) is None
+def test_banned_terms_are_read_from_config_and_cleaned(monkeypatch):
+    cfg = llm_client.get_config()
+    monkeypatch.setitem(cfg["web_search"], "banned_terms",
+                        ["  Willow   Rooms ", "", None, "Hollowby", 7])
+    assert web_search.banned_terms() == ["Willow Rooms", "Hollowby", "7"]
+    monkeypatch.setitem(cfg["web_search"], "banned_terms", "Hollowby")
+    assert web_search.banned_terms() == ["Hollowby"]
 
 
 def test_blocked_term_is_whole_word_and_case_insensitive():
@@ -569,9 +569,8 @@ def test_blocked_term_is_whole_word_and_case_insensitive():
     assert web_search.blocked_term("tom cats", terms) == "Tom"
 
 
-def test_the_real_leak_is_blocked_and_logged():
-    terms = web_search.story_terms(WORLD_BIBLE, OUTLINE,
-                                   allow=["Hampshire", "UK"])
+def test_a_banned_term_is_blocked_and_logged_everything_else_allowed():
+    terms = ["Willow Rooms", "Stuart"]
     dropped = []
     queries = ["Willow Rooms private clinic location and services UK",
                "private physiotherapy self-referral process UK",
@@ -617,15 +616,15 @@ def test_a_real_quote_about_something_else_is_rejected(tmp_path, monkeypatch):
 def test_second_check_confirms_a_good_verdict(tmp_path, monkeypatch):
     _, calls, _ = _research_setup(tmp_path, monkeypatch)
     researcher.run_researcher()
-    second = next(c for c in calls if "Does this quote" in c["prompt"])
+    second = next(c for c in calls if "does this quote" in c["prompt"])
     assert second["system"] == prompts.VERIFIER
     assert 'Quote from https://n.example/t: "sort patients' in second["prompt"]
     assert "directly support the claim" in second["prompt"]
     assert "SUPPORTED:" in _brief_prompt(calls)
 
 
-@pytest.mark.parametrize("reply", ['{"agrees": false}', "no idea",
-                                   '{"agrees": "yes"}'])
+@pytest.mark.parametrize("reply", ['{"answer": false}', "no idea",
+                                   '{"answer": "yes"}', '{"agrees": false}'])
 def test_second_check_disagreement_or_garbage_drops_the_fact(
         tmp_path, monkeypatch, reply):
     out, calls, _ = _research_setup(tmp_path, monkeypatch, second=reply)
@@ -640,7 +639,7 @@ def test_second_check_asks_the_contradiction_question(tmp_path, monkeypatch):
         tmp_path, monkeypatch,
         verdicts=_verdict(verdict="contradicted", note="Use urgency."))
     researcher.run_researcher()
-    second = next(c for c in calls if "Does this quote" in c["prompt"])
+    second = next(c for c in calls if "does this quote" in c["prompt"])
     assert "directly contradict the claim" in second["prompt"]
 
 
@@ -654,7 +653,7 @@ def test_second_check_can_be_switched_off(tmp_path, monkeypatch):
     update_context("chapters", [CHAPTER])
     update_context("bible", BIBLE)
     researcher.run_researcher()
-    assert not any("Does this quote" in c["prompt"] for c in calls)
+    assert not any("does this quote" in c["prompt"] for c in calls)
     assert "SUPPORTED:" in _brief_prompt(calls)
 
 
@@ -663,4 +662,20 @@ def test_unclear_verdicts_are_never_double_checked(tmp_path, monkeypatch):
         tmp_path, monkeypatch,
         verdicts=_verdict(verdict="unclear", source=None, evidence=""))
     researcher.run_researcher()
-    assert not any("Does this quote" in c["prompt"] for c in calls)
+    assert not any("does this quote" in c["prompt"] for c in calls)
+
+
+def test_verification_calls_use_the_verifier_agent(tmp_path, monkeypatch):
+    """Judging results and the second check run as `verifier` (so they can be
+    tuned or sent to another model separately); the claim proposal and the
+    lore brief stay with the researcher."""
+    _, calls, _ = _research_setup(tmp_path, monkeypatch)
+    researcher.run_researcher()
+    agent_of = {}
+    for c in calls:
+        kind = ("propose" if "fact-check a novel" in c["prompt"] else
+                "verify" if "CLAIMS TO VERIFY" in c["prompt"] else
+                "second" if "does this quote" in c["prompt"] else "brief")
+        agent_of[kind] = c["agent"]
+    assert agent_of == {"propose": "researcher", "verify": "verifier",
+                        "second": "verifier", "brief": "researcher"}

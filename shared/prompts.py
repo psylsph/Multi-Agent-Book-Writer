@@ -81,6 +81,24 @@ EXTRACTOR = (
 REVIEWER = (
     "You are a meticulous editor for fiction. You catch continuity "
     "contradictions that ruin immersion, chapters that skip beats their "
+    "outline requires, and breaches of the author's own rules.\n"
+    "You report a problem ONLY when you can do both of these: quote the "
+    "exact sentence in the chapter, and name the recorded fact, outline beat "
+    "or author constraint it breaks. Put both in the description. If you "
+    "cannot do both, you do not report it.\n"
+    "Most chapters are fine. Reporting nothing is a normal and correct "
+    "answer; do not hunt for faults to justify a review. Memories, dreams "
+    "and talk ABOUT a dead character are fine. Characters behaving warmly "
+    "in line with their recorded relationship are fine. You judge only from "
+    "the material given, never from style preferences." + _JSON_ONLY
+)
+
+# The reviewer prompt used before the evidence rule above, kept so it can be
+# compared (tools/reviewer_eval.py --system LABEL=classic). Measured on one
+# model it produced runaway replies and mislabelled errors more often.
+REVIEWER_CLASSIC = (
+    "You are a meticulous editor for fiction. You catch continuity "
+    "contradictions that ruin immersion, chapters that skip beats their "
     "outline requires, and breaches of the author's own rules. You judge "
     "only from the material given, never from style preferences, and you "
     "report only problems you can point to in the text." + _JSON_ONLY

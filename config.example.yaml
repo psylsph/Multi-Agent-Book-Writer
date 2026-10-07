@@ -46,6 +46,12 @@ book:
   # used twice before; and a book-wide list in lint_report.md).
   repetition_lint: true
 
+  # After each chapter's story facts are extracted, cross-check them against
+  # the text: drop names the chapter never mentions, don't re-kill a character
+  # who died earlier, and verify deaths (the costliest error either way) with a
+  # focused yes/no question. Costs nothing in a chapter with no death language.
+  extraction_checks: true
+
   # Words the name-typo lint must never flag (it flags near-misses of
   # character names, e.g. "Kirstie" for "Kirsty"). Plurals and possessives
   # ("Stuarts") are already skipped; list real words that merely resemble a
@@ -77,7 +83,13 @@ llm:
   retries: 2              # retries per request, with backoff
   endpoint_wait: 300      # seconds to wait for a downed/reloading server
                           # before a phase aborts (rerun to resume)
-  # max_tokens: 8192      # optional per-request cap; unset = server default.
+  # max_tokens: 8192      # optional per-request cap for EVERY agent. Unset: the
+                          # researcher, extractor, verifier and reviewer (short
+                          # structured replies) get a built-in ceiling of
+                          # 6000/6000/2000/8000 tokens, because a model that
+                          # loops while writing JSON otherwise never stops; the
+                          # others use the server default. Override per agent
+                          # with agents.<name>.max_tokens.
                           # Replies cut off by a length limit are continued
                           # automatically (up to 3 times) for chapter text.
 
@@ -99,11 +111,25 @@ llm:
 
   # Reasoning models (Qwen3.x style). Both are sent as chat_template_kwargs,
   # and only when set. llama.cpp needs --jinja.
-  # reasoning_effort: low # low | medium | xhigh (the template default is xhigh)
+  #
+  # reasoning_effort: low | medium | xhigh. xhigh is the MAXIMUM the template
+  # accepts (there is no higher level) and also its default. This is the
+  # effort for the writer, editor, architect and planner. Three stages need
+  # less thinking, so unless you set them under `agents:` they use:
+  #   researcher low,  extractor low,  reviewer medium
+  # Leave this commented out and NO thinking controls are sent to anyone
+  # (the built-in per-agent defaults then do nothing too).
+  # reasoning_effort: xhigh
   # enable_thinking: false   # hard off-switch; not honoured by every model
 
 # ---------------------------------------------------------------- agents
-# Per-agent settings. Any agent can use its own model with `model:` (default:
+# Per-agent settings. Besides `model` and `temperature` (below) an agent can set
+# its own `reasoning_effort`, `enable_thinking` and `max_tokens`, overriding the
+# llm.* value; an EMPTY `reasoning_effort:` sends no thinking control for that
+# agent. Example: `writer: {reasoning_effort: xhigh}` and
+# `reviewer: {reasoning_effort: xhigh}` for maximum thinking everywhere.
+#
+# Any agent can use its own model with `model:` (default:
 # llm.model), for example a different model for the reviewer than the one that
 # wrote the chapter, or a small fast one for the extractor. Models must be on
 # the same server (llm.base_url); every one you set is checked at startup. A
@@ -117,39 +143,57 @@ agents:
   architect:              # story bible from the seed
     # model: other-model
     # temperature: 0.7
+    # enable_thinking: true
 
   planner:                # outline and chapter-count suggestion
     # model: other-model
     # temperature: 0.7
+    # enable_thinking: true
 
   researcher:             # per-chapter lore briefs
     # model: other-model
+    # reasoning_effort: low   # built-in default (when llm.reasoning_effort is set)
     enabled: true         # false skips the briefs (faster, less context)
     # temperature: 0.7
+    # enable_thinking: true
+
+  verifier:               # web claims: judging search results + the second check
+    # model: other-model
+    # reasoning_effort: low   # built-in default
+    # max_tokens: 400
+    enable_thinking: false  # measured: as accurate as thinking, ~15x faster
 
   writer:                 # chapter prose
     # model: other-model
+    # reasoning_effort: xhigh # default: llm.reasoning_effort
+    # max_tokens: 8192
     # temperature: 1.0
+    # enable_thinking: true
 
   extractor:              # JSON summary + continuity facts after each chapter
     # model: other-model
+    # reasoning_effort: low   # built-in default
     # temperature: 0.2    # a low value gives more reliable JSON
+    # enable_thinking: true  # false for a non-thinking model such as Phi-4-mini
 
   reviewer:               # continuity review of each chapter
     # model: other-model
+    # reasoning_effort: medium # built-in default
     enabled: true         # false leaves only the deterministic lint
     # temperature: 0.7
+    enable_thinking: false  # measured: no worse with thinking off, ~9x faster
 
   editor:                 # lint -> revise -> polish
     # model: other-model
     enabled: true         # false saves the raw drafts unedited
     # temperature: 0.7
+    # enable_thinking: true
 
 # ------------------------------------------------------------ web_search
 # Lets the researcher fact-check REAL-WORLD details (places, professions,
 # procedures, history) through a SearXNG instance. Off by default.
 #   - Only generic queries are sent: the model is told never to include story
-#     details, and any query containing a character name is dropped.
+#     details, and any query mentioning a term in banned_terms is dropped.
 #   - Results are passed to the model as quoted data. Your invented world
 #     always wins; only real-world errors are flagged.
 #   - What was searched is saved to interim/search_chapter_NN.md.
@@ -164,10 +208,11 @@ web_search:
   #   no  - never touch Docker
   auto_start: ask
   docker_image: "searxng/searxng"
-  # Story-specific names (characters, invented places like "Willow Rooms", other
-  # proper nouns from your world/outline) are never allowed in a query: such
-  # queries are dropped and logged. Real places you DO want searched go here:
-  allow_terms: []         # e.g. ["Hampshire", "Surrey", "England", "UK"]
+  # Terms that must never appear in a search query - character names, an
+  # invented place, anything you don't want sent to a search engine. Everything
+  # else is allowed. A query that mentions one (whole word, any case) is dropped
+  # and logged. A query for a real place is only blocked if you list it.
+  banned_terms: []        # e.g. ["Aria Vance", "Willow Rooms", "Hollowby"]
   # Each verified claim gets a second, independent model check ("does this
   # quote, by itself, directly support/contradict it?"); a disagreement drops
   # the fact. Costs one short call per verified claim.

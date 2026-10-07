@@ -156,3 +156,52 @@ def test_story_so_far_windows_older_chapters():
 def test_story_so_far_empty_for_first_chapter():
     from shared.story_state import render_story_so_far
     assert render_story_so_far({1: "x"}, before=1) == ""
+
+
+# ------------------------------------------- loosely typed model output
+
+import pytest  # noqa: E402
+
+from shared.story_state import as_names  # noqa: E402
+
+
+@pytest.mark.parametrize("value,expected", [
+    (["Tom", "Liz"], ["Tom", "Liz"]),
+    ("Tom Baker", ["Tom Baker"]),                      # a bare string
+    ("Tom and Liz", ["Tom", "Liz"]),
+    ("Tom, Liz; Marcus & Anna + Sam", ["Tom", "Liz", "Marcus", "Anna", "Sam"]),
+    ("Sandra Rowland", ["Sandra Rowland"]),            # 'and' inside a word
+    ([{"name": "Tom"}, {"role": "no name"}, " Liz ", "", None, ["x"]],
+     ["Tom", "Liz"]),
+    ({"name": "Tom"}, ["Tom"]),
+    (None, []), (42, []), (True, []), ("", []),
+])
+def test_as_names(value, expected):
+    assert as_names(value) == expected
+
+
+def test_a_string_for_who_does_not_become_single_letter_characters():
+    """The bug the extractor test found: "who": "Tom Baker" was iterated per
+    character, creating 'T', 'o', 'm', ... as characters in the story state."""
+    state = normalize_state(1, "A", {
+        "present": "Elizabeth Hale, Tom Baker",
+        "events": [{"type": "injury", "who": "Tom Baker"},
+                   {"type": "death", "who": "Marcus Reed and Liz"}]},
+        ["Elizabeth Hale", "Tom Baker", "Marcus Reed"],
+        {"Elizabeth Hale": ["Liz"]})
+    assert state["present"] == ["Elizabeth Hale", "Tom Baker"]
+    assert state["events"][0]["who"] == ["Tom Baker"]
+    assert state["events"][1]["who"] == ["Marcus Reed", "Elizabeth Hale"]
+    cumulative = merge_states({1: state})
+    assert all(len(name) > 1 for name in cumulative["dead"])
+    assert cumulative["dead"] == {"Marcus Reed": 1, "Elizabeth Hale": 1}
+
+
+def test_odd_container_types_are_ignored_not_crashed_on():
+    state = normalize_state(1, "A", {"present": 5, "events": "none"})
+    assert state["present"] == [] and state["events"] == []
+    state = normalize_state(1, "A", {"events": {"type": "death"}})
+    assert state["events"] == []
+    state = normalize_state(1, "A", {"events": [{"type": "death", "who": 7},
+                                                "junk", None]})
+    assert state["events"] == []        # a number is not a person: dropped

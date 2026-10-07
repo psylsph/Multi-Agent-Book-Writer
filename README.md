@@ -308,10 +308,10 @@ All agents share a central `context` dict: `seed`, `title`, `bible`,
 documented in [`config.example.yaml`](config.example.yaml). Every key is
 optional. Keys:
 
-- **book**: `auto_chapters`/`min_chapters`/`max_chapters` (LLM-suggested chapter count and its clamp), `num_chapters` (fallback), `words_per_chapter` (target length), `word_count_tolerance` (enforced minimum as a fraction of the target — short chapters are lint findings and get sent back for substantive expansion, never padding), `extra_length_rounds` (additional revision rounds granted for length only, while each round still adds ≥15%), `revision_rounds` (review/revise passes per chapter; 0 disables revision), `summary_window` (how many recent chapter summaries the writer/reviewer see in full; older ones are cut to a sentence), `review_as_you_go` (see [Review as you go](#review-as-you-go)), `review_checks` and `repetition_lint` (see [Review quality](#review-quality)), `name_lint_ignore` (words the name-typo lint must never flag)
-- **llm**: `base_url`, `api_key` (`""`, plain value, or `env:VAR`; `LLM_API_KEY` env var is the fallback), `model`, `timeout` (per request), `retries` (with backoff), `max_tokens` (optional per-request cap; replies cut off by a length limit are continued automatically), `endpoint_wait` (seconds to wait for a downed/reloading server before aborting a phase), `reasoning_effort` (`""`, `low`, `medium`, `xhigh`; sent as `chat_template_kwargs.reasoning_effort` for Qwen3.8-style thinking models — the template default is `xhigh`), `enable_thinking` (`true`/`false`; sent as `chat_template_kwargs.enable_thinking` when set; reportedly unsupported on Qwen3.8), `stream`, `json_mode` and `context_window` (see [Observability](#observability))
-- **agents**: per-agent `model` (default `llm.model`; each must exist on the same server and is checked at startup) and `temperature` for `architect`, `planner`, `researcher`, `writer`, `extractor` (per-chapter JSON continuity extraction), `reviewer`, `editor` — only sent when set; otherwise the server/model default applies — and `enabled` for `researcher`/`reviewer`/`editor` (disable them to speed things up)
-- **web_search**: `enabled`, `searxng_url`, `auto_start`, `docker_image`, `queries_per_chapter`, `results_per_query`, `snippet_chars`, `categories`, `timeout`, `double_check`, `allow_terms` (see [Web fact-checking](#web-fact-checking-optional))
+- **book**: `auto_chapters`/`min_chapters`/`max_chapters` (LLM-suggested chapter count and its clamp), `num_chapters` (fallback), `words_per_chapter` (target length), `word_count_tolerance` (enforced minimum as a fraction of the target — short chapters are lint findings and get sent back for substantive expansion, never padding), `extra_length_rounds` (additional revision rounds granted for length only, while each round still adds ≥15%), `revision_rounds` (review/revise passes per chapter; 0 disables revision), `summary_window` (how many recent chapter summaries the writer/reviewer see in full; older ones are cut to a sentence), `review_as_you_go` (see [Review as you go](#review-as-you-go)), `review_checks` and `repetition_lint` (see [Review quality](#review-quality)), `name_lint_ignore` (words the name-typo lint must never flag), `extraction_checks` (see [Review quality](#review-quality))
+- **llm**: `base_url`, `api_key` (`""`, plain value, or `env:VAR`; `LLM_API_KEY` env var is the fallback), `model`, `timeout` (per request), `retries` (with backoff), `max_tokens` (optional per-request cap; replies cut off by a length limit are continued automatically), `endpoint_wait` (seconds to wait for a downed/reloading server before aborting a phase), `reasoning_effort` (`""`, `low`, `medium`, `xhigh` = the maximum; sent as `chat_template_kwargs.reasoning_effort` for Qwen3.8-style thinking models. When set, the researcher and extractor default to `low` and the reviewer to `medium`; the other stages use the value as set. Empty sends no thinking controls to anyone), `enable_thinking` (`true`/`false`; sent as `chat_template_kwargs.enable_thinking` when set; reportedly unsupported on Qwen3.8), `stream`, `json_mode` and `context_window` (see [Observability](#observability))
+- **agents**: per-agent `model` (default `llm.model`; each must exist on the same server and is checked at startup), `reasoning_effort` / `enable_thinking` / `max_tokens` (override the `llm.*` value; an empty `reasoning_effort:` sends nothing for that agent). The researcher, extractor, verifier and reviewer, which only produce short structured replies, have a built-in output ceiling (6000 / 6000 / 2000 / 8000 tokens) unless you set `max_tokens`: a model that loops while writing JSON otherwise never stops and `temperature` for `architect`, `planner`, `researcher`, `verifier` (judging search results and the second check), `writer`, `extractor` (per-chapter JSON continuity extraction), `reviewer`, `editor` — only sent when set; otherwise the server/model default applies — and `enabled` for `researcher`/`reviewer`/`editor` (disable them to speed things up)
+- **web_search**: `enabled`, `searxng_url`, `auto_start`, `docker_image`, `queries_per_chapter`, `results_per_query`, `snippet_chars`, `categories`, `timeout`, `double_check`, `banned_terms` (see [Web fact-checking](#web-fact-checking-optional))
 - **output**: `directory`, `filename`, `overwrite` (`false` appends `-1`, `-2`, ... instead of clobbering), `interim` (progress artifacts under `<directory>/interim/`), `log` (copy console output to `<directory>/logs/run-<time>.log`)
 
 Misspelled or unknown options are not silently ignored: at startup each one is reported with a suggestion, e.g. `[CONFIG] unknown key 'book.revision_round' is ignored (did you mean 'revision_rounds'?)`.
@@ -360,6 +360,19 @@ continuity checks (deaths, who has met, timeline) there are:
   sentence-level diff from draft to final, the lint findings it started with and
   every decision the editor took (revision accepted or rejected and why, polish
   accepted or rejected), so you can audit what was changed and catch over-editing.
+- **Extraction checks** (`book.extraction_checks`, on by default): the story
+  facts extracted after each chapter are cross-checked against the chapter text.
+  Names the text never mentions are dropped (invented characters, and a meeting
+  or relationship change that loses one of its two people); a character who
+  died in an *earlier* chapter is not killed again (that would move the death);
+  and deaths, the costliest error either way, are verified with **one** focused
+  question per chapter. The candidates are every death the model claimed plus
+  every bible character named near death language (including euphemisms such as
+  "he's gone" or a hand on a pulse), and the model says which really die: a
+  claimed death that isn't confirmed is dropped, and a confirmed one the
+  extractor missed is added. A chapter with no death language and no claimed
+  death costs no extra call. The extractor also tolerates loosely typed output
+  (`"who": "Tom and Liz"` instead of a list).
 - **Character names**: a nickname resolves to the bible character, either one
   declared in the seed (`**Elizabeth (Liz)**`, `aka Liz`, `known as Liz`) or a
   common short form (Liz/Beth for Elizabeth, Bob for Robert, Stu for Stuart...),
@@ -438,13 +451,13 @@ you'd rather run your own SearXNG, point `searxng_url` at it and enable
 
 **What gets sent.** For each chapter the model proposes a few concrete
 real-world *claims* (how a profession, procedure or place really works), each
-with a short generic query. A query is dropped, and logged, if it mentions a
-character name, an invented place or other proper noun from your world,
-outline or premise (for example "Willow Rooms"), or if it essentially repeats a
-query already run for an earlier chapter. Real places you do want searched go
-in `web_search.allow_terms` (this repo's `config.yaml` allows Hampshire,
-Surrey, England, UK, English and British). Everything searched, and every
-verdict, is saved to `output/interim/search_chapter_NN.md` so you can audit it.
+with a short generic query (the model is told never to put story details in
+it). Every query is allowed by default. A query is dropped, and logged, if it
+mentions a term in `web_search.banned_terms` (whole word, any case; list
+character names, an invented place such as "Willow Rooms", anything you don't
+want sent to a search engine), or if it essentially repeats a query already run
+for an earlier chapter. Nothing is detected automatically: a name you don't
+list can be searched. Everything searched, and every verdict, is saved to `output/interim/search_chapter_NN.md` so you can audit it.
 Queries still leave your machine through SearXNG's upstream search engines.
 
 **How claims are verified.** After searching, the model judges each claim from
@@ -458,6 +471,78 @@ invented world always stands; only real-world errors are corrected. If search
 or verification fails the brief is written without web facts; the run never
 stops for a search problem. Resumed runs skip chapters that already have a
 brief, and skip the setup offer when every brief exists.
+
+## Evaluating a model for a stage
+
+`tools/extractor_eval.py` scores models on the **extractor** (the step that
+records who is on the page and what happened; a wrong event poisons every later
+continuity check). It runs the pipeline's real extraction code against five
+invented chapters whose correct answers are known, including traps (a character
+who is only mentioned, a nickname, a chapter where nothing happens), and reports
+valid-JSON rate, recall/precision, invented events, **false deaths** and speed:
+
+```bash
+uv run python tools/extractor_eval.py \
+    --target main http://127.0.0.1:8080 my-main-model \
+    --target small http://127.0.0.1:9090 my-small-model --no-thinking small \
+    --runs 3                    # models are non-deterministic: repeat
+```
+
+Each target can carry its own `--temperature LABEL=T`, `--system LABEL=NAME`
+(a prompt variant from `tools/extractor_prompts.py`, or `@file.txt`),
+`--no-thinking LABEL` and `--no-checks LABEL`, so the *same* model can be
+compared under different temperatures, system prompts and with the extraction
+checks on or off. `--cases 4,8` runs a subset (ten cases cover backstory deaths,
+near-deaths, an implicit death, a funeral after a recorded death and an attack
+nobody dies in).
+
+`--json-mode` tries grammar-constrained JSON; `--chapters-dir output/chapters`
+instead compares targets on your own chapters (agreement with the first target,
+no ground truth).
+
+### The verdict second check
+
+`tools/verdict_eval.py` does the same for `web_search.double_check` (34
+claim/quote pairs with known answers: supported, contradicted, same-topic but
+unrelated, sign backwards, claim stronger than the quote). It reports accuracy
+and, separately, the **false yes** rate, the costly error (a misread fact reaches
+the writer), against the false no rate (a good fact dropped). A short yes/no
+task like this is where a small model on a CPU can be a useful second opinion
+from another model family:
+
+```bash
+REPO=LiquidAI/LFM2.5-2.6B-GGUF ALIAS=lfm tools/run-small-model.sh -d   # CPU, port 9090
+uv run python tools/verdict_eval.py --runs 3 \
+    --target main http://127.0.0.1:8080 my-main-model \
+    --target lfm  http://127.0.0.1:9090 lfm --no-thinking lfm --system lfm=strict
+```
+
+### The reviewer
+
+`tools/reviewer_eval.py` scores reviewers on 14 versions of one chapter: four
+clean (two deliberately tempting: a dream about the dead harbourmaster, and a
+warm scene that *is* consistent with the recorded relationship) and ten with
+one planted error each (a dead character acting alive, a relationship
+regression and leap, a secret someone could not know, an injury that healed
+overnight, a weekday that contradicts the timeline, a character in the wrong
+country, a missing outline beat, a point-of-view slip, a tense slip). It
+reports how many errors are found, how many are labelled with the right type,
+how many clean chapters are wrongly sent back for revision (a wasted round and a
+risk of new errors), and every miss and false alarm. `--system LABEL=classic`
+compares the previous reviewer prompt; `--max-tokens LABEL=N` bounds a model that
+loops. Nothing is written to your output directory.
+
+```bash
+uv run python tools/reviewer_eval.py --runs 2 -v \
+    --target main http://127.0.0.1:8080 my-main-model \
+    --target small http://127.0.0.1:9090 my-small-model --max-tokens small=8000
+```
+
+`tools/run-small-model.sh` starts any small GGUF model from Hugging Face as a
+CPU-only llama.cpp server on port 9090 (loopback only, memory-guarded, resumable
+checksummed download): `REPO=owner/model-GGUF ALIAS=name QUANT=Q6_K
+tools/run-small-model.sh -d`, then `status` / `stop`. It needs `llama-server` on
+`PATH` or `LLAMA_SERVER=/path/to/llama-server`.
 
 ## Development
 

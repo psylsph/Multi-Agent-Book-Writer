@@ -113,12 +113,14 @@ def _build_prompt(number, title, draft, checks, bible):
     return "\n\n".join(parts)
 
 
-def run_reviewer(number, title, draft):
-    """
-    Review one chapter draft (see the module docstring for the checks).
+def review_chapter(number, title, draft):
+    """Review one chapter draft (see the module docstring for the checks).
 
-    Returns (verdict, issues) where verdict is "pass" or "revise" and
-    issues is a list of {type, description, fix} dicts.
+    Returns (verdict, issues) where verdict is "pass" or "revise" and issues
+    is a list of {type, description, fix} dicts. Raises when the model's
+    answer cannot be read (and EndpointUnavailable when the server is down);
+    run_reviewer() turns the former into a pass so a bad reply never blocks a
+    run, but an evaluation needs to tell the two apart.
     """
     bible = context.get("bible") or {}
     checks = enabled_checks()
@@ -127,41 +129,48 @@ def run_reviewer(number, title, draft):
     disabled = {t for check, types in _TYPES_BY_CHECK.items()
                 if check not in checks for t in types}
 
+    raw = generate_with_wait(
+        prompt, system=prompts.with_bible(prompts.REVIEWER, bible),
+        agent="reviewer", json_mode=True)
+    data = extract_json(raw, expect="object")
+    issues = []
+    for issue in data.get("issues") or []:
+        if isinstance(issue, dict) and issue.get("description"):
+            kind = str(issue.get("type", "continuity")).strip()
+            if kind in disabled:
+                continue
+            issues.append({
+                "type": kind,
+                "description": str(issue["description"]).strip(),
+                "fix": str(issue.get("fix", "")).strip(),
+            })
+    verdict = "revise" if issues else "pass"
+    scope = ", ".join(checks)
+    if not issues:
+        save_interim(chapter_filename("review", number),
+                     f"# Review - Chapter {number}: {title}\n\n"
+                     f"**Verdict: PASS** - no issues found "
+                     f"(checked: {scope}).\n")
+    else:
+        body = "\n".join(
+            f"- **[{i['type']}]** {i['description']}"
+            + (f"\n  Fix: {i['fix']}" if i["fix"] else "")
+            for i in issues)
+        save_interim(chapter_filename("review", number),
+                     f"# Review - Chapter {number}: {title}\n\n"
+                     f"**Verdict: REVISE** ({len(issues)} issues; "
+                     f"checked: {scope})\n\n{body}\n")
+    return verdict, issues
+
+
+def run_reviewer(number, title, draft):
+    """review_chapter(), but a reply that cannot be read counts as a pass: a
+    review failure must never block the pipeline. A server outage still
+    aborts (don't silently mark chapters reviewed while it is down)."""
     try:
-        raw = generate_with_wait(
-            prompt, system=prompts.with_bible(prompts.REVIEWER, bible),
-            agent="reviewer", json_mode=True)
-        data = extract_json(raw, expect="object")
-        issues = []
-        for issue in data.get("issues") or []:
-            if isinstance(issue, dict) and issue.get("description"):
-                kind = str(issue.get("type", "continuity")).strip()
-                if kind in disabled:
-                    continue
-                issues.append({
-                    "type": kind,
-                    "description": str(issue["description"]).strip(),
-                    "fix": str(issue.get("fix", "")).strip(),
-                })
-        verdict = "revise" if issues else "pass"
-        scope = ", ".join(checks)
-        if not issues:
-            save_interim(chapter_filename("review", number),
-                         f"# Review - Chapter {number}: {title}\n\n"
-                         f"**Verdict: PASS** - no issues found "
-                         f"(checked: {scope}).\n")
-        else:
-            body = "\n".join(
-                f"- **[{i['type']}]** {i['description']}"
-                + (f"\n  Fix: {i['fix']}" if i["fix"] else "")
-                for i in issues)
-            save_interim(chapter_filename("review", number),
-                         f"# Review - Chapter {number}: {title}\n\n"
-                         f"**Verdict: REVISE** ({len(issues)} issues; "
-                         f"checked: {scope})\n\n{body}\n")
-        return verdict, issues
+        return review_chapter(number, title, draft)
     except EndpointUnavailable:
-        raise  # don't silently mark chapters as reviewed while the server is down
+        raise
     except Exception as e:
         print(f"[REVIEWER] Error reviewing chapter {number}: {e}")
-        return "pass", []  # don't block the pipeline on a review failure
+        return "pass", []

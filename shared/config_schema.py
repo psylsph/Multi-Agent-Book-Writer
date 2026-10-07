@@ -15,6 +15,7 @@ KNOWN_KEYS = {
         "words_per_chapter", "word_count_tolerance", "revision_rounds",
         "extra_length_rounds", "review_as_you_go", "review_checks",
         "repetition_lint", "name_lint_ignore", "summary_window",
+        "extraction_checks",
     },
     "llm": {
         "base_url", "model", "api_key", "timeout", "retries",
@@ -25,17 +26,25 @@ KNOWN_KEYS = {
     "web_search": {
         "enabled", "searxng_url", "auto_start", "docker_image",
         "queries_per_chapter", "results_per_query", "snippet_chars",
-        "categories", "timeout", "double_check", "allow_terms",
+        "categories", "timeout", "double_check", "banned_terms",
     },
 }
 
-AGENTS = ("architect", "planner", "researcher", "writer", "extractor",
+AGENTS = ("architect", "planner", "researcher", "verifier", "writer",
+          "extractor",
           "reviewer", "editor")
-AGENT_KEYS = {"model", "temperature", "enabled"}
+AGENT_KEYS = {"model", "temperature", "enabled", "reasoning_effort",
+              "enable_thinking", "max_tokens"}
 # Only these stages are optional, so only they have an off switch.
 ENABLE_HONOURED = {"researcher", "reviewer", "editor"}
 
 LEGACY_SECTIONS = {"ollama"}  # migrated by load_config
+# Keys that were renamed or removed: say what to do instead of guessing.
+RETIRED_KEYS = {
+    ("web_search", "allow_terms"): (
+        "no longer used: every query is allowed unless it mentions a term in "
+        "web_search.banned_terms"),
+}
 
 
 def _suggest(word, choices):
@@ -73,7 +82,9 @@ def problems(cfg):
                             + " can be switched off)")
             continue
         for key in values:
-            if key not in KNOWN_KEYS[section]:
+            if (section, key) in RETIRED_KEYS:
+                out.append(f"'{section}.{key}' is {RETIRED_KEYS[(section, key)]}")
+            elif key not in KNOWN_KEYS[section]:
                 out.append(f"unknown key '{section}.{key}' is ignored"
                            + _suggest(key, KNOWN_KEYS[section]))
     return out

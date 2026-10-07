@@ -33,7 +33,7 @@ WEB_SEARCH_DEFAULTS = {
     "categories": "general",
     "timeout": 15,
     "double_check": True,           # second model pass over each verdict
-    "allow_terms": [],             # real names exempt from the story-term filter
+    "banned_terms": [],            # never allowed in a search query
 }
 
 
@@ -139,6 +139,69 @@ def _headers(api_key):
     return headers
 
 
+# ------------------------------------------------- per-agent thinking effort
+
+# Reasoning models think for a very long time at their highest effort. These
+# stages need little of it (notes, JSON extraction) or some (continuity
+# judgement), so they default to less. The other stages (writer, editor,
+# architect, planner) use llm.reasoning_effort as set. Applied ONLY when
+# llm.reasoning_effort is set: an empty value means "send no thinking
+# controls", and the defaults must not start sending them. Override per agent
+# with agents.<name>.reasoning_effort.
+AGENT_REASONING_DEFAULTS = {
+    "researcher": "low",
+    "verifier": "low",
+    "extractor": "low",
+    "reviewer": "medium",
+}
+
+
+def _template_kwargs(llm_cfg, agent_cfg, agent):
+    """chat_template_kwargs for one agent's request ({} when none apply).
+
+    reasoning_effort: agents.<name>.reasoning_effort if the key is present
+    (an empty value sends nothing); else, when llm.reasoning_effort is set,
+    the built-in default for the agent or the global value.
+    enable_thinking: agents.<name>.enable_thinking, else llm.enable_thinking.
+    """
+    kwargs = {}
+    if "reasoning_effort" in agent_cfg:
+        effort = str(agent_cfg["reasoning_effort"] or "").strip().lower()
+    else:
+        effort = str(llm_cfg.get("reasoning_effort") or "").strip().lower()
+        if effort:
+            effort = AGENT_REASONING_DEFAULTS.get(agent, effort)
+    if effort:
+        kwargs["reasoning_effort"] = effort
+    thinking = (agent_cfg["enable_thinking"] if "enable_thinking" in agent_cfg
+                else llm_cfg.get("enable_thinking"))
+    if thinking is not None:
+        kwargs["enable_thinking"] = bool(thinking)
+    return kwargs
+
+
+# A model that loops while writing JSON never stops: measured on a thinking
+# model, a single review ran past 9,800 tokens (about 10 minutes) before it was
+# cancelled, and an unparseable reply is then silently treated as a pass. These
+# agents only ever produce short structured replies (plus, at most, modest
+# thinking), so they get a generous ceiling by default. The writer, editor,
+# architect and planner are NOT capped: their thinking at xhigh can be long.
+# Used only when neither agents.<name>.max_tokens nor llm.max_tokens is set.
+AGENT_MAX_TOKENS_DEFAULTS = {
+    "researcher": 6000,
+    "extractor": 6000,
+    "verifier": 2000,
+    "reviewer": 8000,
+}
+
+
+def _max_tokens(llm_cfg, agent_cfg, agent=None):
+    """agents.<name>.max_tokens, else llm.max_tokens, else the built-in
+    ceiling for short-reply agents (AGENT_MAX_TOKENS_DEFAULTS), else None."""
+    return (agent_cfg.get("max_tokens") or llm_cfg.get("max_tokens")
+            or AGENT_MAX_TOKENS_DEFAULTS.get(agent) or None)
+
+
 # ---------------------------------------------------------------- run stats
 
 PROGRESS_SECONDS = 20          # streaming progress line interval
@@ -214,14 +277,14 @@ def _chars_per_token():
     return 3.5
 
 
-def _check_context(messages, agent, llm_cfg):
+def _check_context(messages, agent, llm_cfg, agent_cfg=None):
     """Warn (once per agent) when a prompt nears the configured window."""
     window = llm_cfg.get("context_window")
     if not window or agent in _WARNED:
         return
     chars = sum(len(m["content"]) for m in messages)
     estimate = chars / _chars_per_token()
-    reserve = int(llm_cfg.get("max_tokens") or 0)
+    reserve = int(_max_tokens(llm_cfg, agent_cfg or {}, agent) or 0)
     if estimate + reserve > 0.9 * int(window):
         _WARNED.add(agent)
         print(f"[LLM] Warning: the {agent} prompt is about {estimate:,.0f} "
@@ -303,27 +366,23 @@ def _request(messages, agent="writer", model=None, json_mode=False):
     }
     if temperature is not None:
         payload["temperature"] = float(temperature)
-    if llm_cfg.get("max_tokens"):
-        payload["max_tokens"] = int(llm_cfg["max_tokens"])
+    max_tokens = _max_tokens(llm_cfg, agent_cfg, agent)
+    if max_tokens:
+        payload["max_tokens"] = int(max_tokens)
     if (json_mode and llm_cfg.get("json_mode")
             and not _STATE["json_mode_broken"]):
         payload["response_format"] = {"type": "json_object"}
 
-    # Chat-template controls for reasoning models (Qwen3.x etc.). The
-    # template's built-in default is the highest effort ('xhigh'), so set
-    # llm.reasoning_effort (low/medium/xhigh) to turn thinking down.
-    chat_template_kwargs = {}
-    effort = str(llm_cfg.get("reasoning_effort") or "").strip().lower()
-    if effort:
-        chat_template_kwargs["reasoning_effort"] = effort
-    if llm_cfg.get("enable_thinking") is not None:
-        chat_template_kwargs["enable_thinking"] = bool(
-            llm_cfg["enable_thinking"])
+    # Chat-template controls for reasoning models (Qwen3.x etc.): the
+    # template's built-in default is the highest effort, so set
+    # llm.reasoning_effort (low/medium/xhigh) to choose. See _template_kwargs
+    # for the per-agent defaults and overrides.
+    chat_template_kwargs = _template_kwargs(llm_cfg, agent_cfg, agent)
     if chat_template_kwargs:
         payload["chat_template_kwargs"] = chat_template_kwargs
 
     prompt_chars = sum(len(m["content"]) for m in messages)
-    _check_context(messages, agent, llm_cfg)
+    _check_context(messages, agent, llm_cfg, agent_cfg)
 
     def post():
         return requests.post(f"{base_url}/v1/chat/completions", json=payload,
@@ -446,8 +505,11 @@ def generate(prompt, system=None, agent="writer", model=None,
     text, reason = _request(_messages(prompt, system), agent, model,
                             json_mode)
     if reason == "length":
-        print("[LLM] Warning: the response was cut off (finish_reason=length); "
-              "raise the server's context/generation limit.")
+        print(f"[LLM] Warning: the {agent} reply was cut off "
+              "(finish_reason=length): it hit max_tokens or the server's "
+              "limit. If it was looping, fix the prompt or lower the "
+              f"temperature; if it needs more room, raise "
+              f"agents.{agent}.max_tokens.")
     return text
 
 

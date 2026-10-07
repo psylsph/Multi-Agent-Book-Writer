@@ -46,6 +46,12 @@ def test_enabled_on_an_always_on_stage_is_flagged():
     assert any("'agents.extractor.tempreture'" in m for m in out)
 
 
+def test_the_retired_allow_terms_key_says_what_replaced_it():
+    out = config_schema.problems({"web_search": {"allow_terms": ["UK"]}})
+    assert len(out) == 1 and "banned_terms" in out[0]
+    assert "unknown key" not in out[0]
+
+
 def test_unrelated_garbage_has_no_suggestion():
     (msg,) = config_schema.problems({"book": {"zzzzzz": 1}})
     assert msg == "unknown key 'book.zzzzzz' is ignored"

@@ -89,87 +89,16 @@ def search(query):
     return results
 
 
-# Two or more consecutive capitalised words ("Willow Rooms", "Chapel of Ease").
-_PHRASE_RE = re.compile(
-    r"\b[A-Z][a-z]+(?:\s+(?:(?:of|the|de|la|le|von|van|upon)\s+)?"
-    r"[A-Z][a-z]+)+")
-_CAP_WORD_RE = re.compile(r"\b[A-Z][a-z]{2,}\b")
-_LOWER_WORD_RE = re.compile(r"\b[a-z][a-z'\u2019-]+\b")
-# Function words that start sentences ("When Stuart..."); never part of a
-# proper noun on their own.
-_FUNCTION_WORDS = {
-    "the", "a", "an", "at", "in", "on", "of", "when", "after", "before",
-    "during", "with", "from", "to", "and", "but", "or", "if", "then", "this",
-    "that", "these", "those", "it", "he", "she", "they", "we", "as", "by",
-    "for", "so", "yet", "while", "until", "though", "although", "his", "her",
-    "their", "our", "my", "your", "no", "not",
-}
-_SENTENCE_BREAKS = ".!?:;\n*#>-\u2014\u2013(\"\u201c'"
-
-
-def _mid_sentence(corpus, start):
-    """True when the word at `start` doesn't open a sentence, line or bullet
-    (so its capital letter means 'proper noun', not 'first word')."""
-    before = corpus[:start].rstrip(" \t")
-    return bool(before) and before[-1] not in _SENTENCE_BREAKS
-
-
-def story_terms(bible, chapters=(), allow=()):
-    """Story-specific names that must never appear in a search query.
-
-    Character names (and each part of them), capitalised phrases such as an
-    invented clinic or village ("Willow Rooms"), and single capitalised words
-    that appear capitalised mid-sentence but never in lower case (a proper
-    noun). Real places you DO want searched go in web_search.allow_terms and
-    are removed. Returns the terms longest-first.
-    """
-    characters = bible.get("characters") or []
-    texts = [bible.get("premise", ""), bible.get("world", "")]
-    for c in characters:
-        texts.append(c.get("description", ""))
-    for ch in chapters or ():
-        texts.append(ch.get("summary", ""))   # titles are Title Case: noise
-    corpus = "\n".join(str(x) for x in texts if x)
-    lower_words = set(_LOWER_WORD_RE.findall(corpus))
-
-    terms = set()
-    for c in characters:
-        # "Carole (from No.12)" -> "Carole"; every capitalised part counts
-        name = re.sub(r"\(.*?\)", " ", str(c.get("name", ""))).strip()
-        if name:
-            terms.add(name)
-            terms.update(w for w in re.findall(r"[A-Z][a-z]+", name)
-                         if len(w) > 1)
-
-    def proper_noun(word):
-        return (word.lower() not in lower_words and any(
-            m.group(0) == word and _mid_sentence(corpus, m.start())
-            for m in re.finditer(rf"\b{re.escape(word)}\b", corpus)))
-
-    for m in _PHRASE_RE.finditer(corpus):
-        words = m.group(0).split()
-        while words and words[0].lower() in _FUNCTION_WORDS:
-            words.pop(0)
-        if len(words) >= 2:
-            terms.add(" ".join(words))
-        elif words and len(words[0]) > 2 and proper_noun(words[0]):
-            terms.add(words[0])
-    terms.update(w for w in set(_CAP_WORD_RE.findall(corpus))
-                 if w.lower() not in _FUNCTION_WORDS and proper_noun(w))
-
-    allowed = {str(a).strip().lower() for a in allow if str(a).strip()}
-
-    def is_allowed(term):
-        words = re.findall(r"[\w'\u2019-]+", term.lower())
-        return term.lower() in allowed or (words and all(
-            w in allowed for w in words))
-
-    return sorted((x for x in terms if len(x) > 1 and not is_allowed(x)),
-                  key=lambda x: (-len(x), x))
+def banned_terms():
+    """The user's web_search.banned_terms as a clean list of strings."""
+    raw = settings().get("banned_terms") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    return [" ".join(str(x).split()) for x in raw if x is not None and str(x).strip()]
 
 
 def blocked_term(query, forbidden_terms):
-    """The first forbidden term the query mentions (whole word, any case)."""
+    """The first banned term the query mentions (whole word, any case)."""
     low = query.lower()
     for term in forbidden_terms:
         if term and len(term) > 1 and re.search(
@@ -182,9 +111,9 @@ def safe_queries(raw, forbidden_terms=(), limit=3, on_drop=None):
     """Clean model-proposed queries before anything leaves the machine.
 
     Drops non-strings, over-long queries, duplicates, and any query that
-    mentions a forbidden term (see story_terms), so the story itself is never
-    sent to the search provider. on_drop(query, term) is called for each
-    query removed for a forbidden term.
+    mentions a banned term (web_search.banned_terms), so the names you list
+    are never sent to the search provider. Everything else is allowed.
+    on_drop(query, term) is called for each query removed for a banned term.
     """
     out = []
     for q in raw if isinstance(raw, list) else []:
@@ -335,11 +264,16 @@ def second_check_prompt(verdict):
     """Independent yes/no question about ONE verdict: does the quote, taken
     by itself, directly support or contradict the claim?"""
     word = "support" if verdict["verdict"] == "supported" else "contradict"
+    # The answer key is "answer", not "agrees": for a CONTRADICTION verdict a
+    # model reads {"agrees": true} as "the quote agrees with the claim" and
+    # answers false to a quote that does contradict it, so correct
+    # contradictions were being thrown away.
     return (f'Claim: {verdict["claim"]}\n'
             f'Quote from {verdict["url"]}: "{verdict["evidence"]}"\n\n'
-            f"Does this quote, taken by itself, directly {word} the claim? "
-            "Answer only from the quote. Reply with ONLY JSON: "
-            '{"agrees": true} or {"agrees": false}')
+            f"Question: does this quote, taken by itself, directly {word} "
+            "the claim? Answer only from the quote.\n"
+            'Reply with ONLY JSON: {"answer": true} if YES, '
+            '{"answer": false} if NO.')
 
 
 def format_claims_for_verifier(claims):

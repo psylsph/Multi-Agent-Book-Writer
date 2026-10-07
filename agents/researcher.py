@@ -19,13 +19,12 @@ from shared.output import chapter_filename, save_interim
 
 
 def _log_dropped(query, term):
-    print(f"[SEARCH] Dropped query '{query}': it mentions the story term "
-          f"'{term}'. (If that is a real place worth searching, add it to "
-          "web_search.allow_terms.)")
+    print(f"[SEARCH] Dropped query '{query}': it mentions the banned term "
+          f"'{term}' (web_search.banned_terms).")
 
 
 def _claims_from(raw, forbidden, limit, seen):
-    """Parse proposed claims; drop any whose query leaks a story term or
+    """Parse proposed claims; drop any whose query mentions a banned term or
     repeats one already searched. Returns [{"claim", "query"}]."""
     items = extract_json(raw, expect="array")
     claims = []
@@ -54,6 +53,27 @@ def _claims_from(raw, forbidden, limit, seen):
     return claims
 
 
+def confirms(verdict):
+    """Independent yes/no on ONE verdict: does the quote, by itself, directly
+    support (or contradict) the claim, as the first pass said?
+
+    True / False, or None when the answer was unreadable (not JSON, or no
+    boolean "answer"; the old key "agrees" is still read). Raises
+    EndpointUnavailable like any LLM call.
+    """
+    try:
+        raw = generate_with_wait(web_search.second_check_prompt(verdict),
+                                 system=prompts.VERIFIER,
+                                 agent="verifier", json_mode=True)
+        data = extract_json(raw, expect="object")
+        agrees = data.get("answer", data.get("agrees"))
+    except EndpointUnavailable:
+        raise
+    except Exception:
+        return None
+    return agrees if isinstance(agrees, bool) else None
+
+
 def _double_check(n, verdicts):
     """Ask the model, per verified claim and independently of the first
     pass, whether the quote alone directly supports/contradicts it. A
@@ -62,16 +82,7 @@ def _double_check(n, verdicts):
     for v in verdicts:
         if v["verdict"] == "unclear":
             continue
-        try:
-            raw = generate_with_wait(web_search.second_check_prompt(v),
-                                     system=prompts.VERIFIER,
-                                     agent="researcher", json_mode=True)
-            agrees = extract_json(raw, expect="object").get("agrees") is True
-        except EndpointUnavailable:
-            raise
-        except Exception:
-            agrees = False
-        if not agrees:
+        if confirms(v) is not True:
             v.update(verdict="unclear", evidence="", url="", note="",
                      reason="second check did not confirm it")
             print(f"[RESEARCHER] Chapter {n}: dropped '{v['claim']}' "
@@ -145,7 +156,7 @@ Return ONLY a JSON array: [{{"claim": "a checkable statement", "query": "a short
 For each claim return an object:
 {"claim_id": 1, "verdict": "supported" or "contradicted" or "unclear", "source": <the [n] of the result that settles it, or null>, "evidence": "an exact quote copied from that result", "note": "if contradicted: the correct fact in one sentence"}
 Use "unclear" unless a result directly addresses the claim. Return ONLY a JSON array, one object per claim.""",
-                system=prompts.VERIFIER, agent="researcher")
+                system=prompts.VERIFIER, agent="verifier")
             verdicts = web_search.validate_verdicts(
                 claims, extract_json(raw, expect="array"))
             if ws.get("double_check", True):
@@ -180,9 +191,7 @@ def run_researcher():
     system = prompts.with_bible(prompts.RESEARCHER, bible)
     seen_queries = []  # searched so far, across chapters (skip repeats)
     use_web = web_search.enabled() and web_search.is_available()
-    forbidden = (web_search.story_terms(
-        bible, chapters, web_search.settings()["allow_terms"])
-        if use_web else [])
+    forbidden = web_search.banned_terms() if use_web else []
     if use_web:
         print("[RESEARCHER] Web fact-checking is on "
               f"({web_search.settings()['searxng_url']}).")

@@ -9,7 +9,7 @@ story state (chronology) used by every later continuity check.
 
 import re
 
-from shared import prompts
+from shared import extraction_checks, prompts
 from shared.context import context, update_context
 from shared.llm_utils import clean_llm_text, extract_json
 from shared.llm_client import (EndpointUnavailable, generate_prose,
@@ -96,7 +96,7 @@ def _summarize_and_extract(number, title, draft, fallback=True):
   "summary": "3-4 factual sentences: key events, new characters or settings, how the chapter ends",
   "time": "when it takes place (e.g. 'Thursday afternoon, week one')",
   "location": "primary location",
-  "present": ["every named character on page"],
+  "present": ["characters who are physically in a scene of this chapter"],
   "events": [
     {{"type": "first_meeting", "who": ["A", "B"]}},
     {{"type": "relationship_change", "who": ["A", "B"], "detail": "e.g. became lovers / had a row / first flirtation"}},
@@ -105,7 +105,14 @@ def _summarize_and_extract(number, title, draft, fallback=True):
     {{"type": "secret_revealed", "who": ["X"], "detail": "what and to whom"}}
   ]
 }}
-Only include event types that actually happened; use [] if none. Use character names exactly as written.
+Rules:
+- "present": only characters who are in a scene of this chapter, speaking or acting. NOT people who are merely mentioned, remembered, expected, or dead.
+- first_meeting: two characters meeting for the FIRST time in this chapter. If the text shows they already know each other, it is not a first meeting.
+- relationship_change: a clear shift shown in this chapter (new intimacy, a break, a betrayal). Not ordinary conversation, teamwork or friendliness.
+- death: a character dies in this chapter or is reported dead in it. injury: someone is physically hurt.
+- secret_revealed: someone learns something that was hidden from them; "who" is the person who learns it.
+- Only include events that actually happened in this chapter; use [] if none. When unsure, leave the event out: a missing event is better than an invented one.
+- Use character names exactly as written.
 {names_line}
 Chapter {number}: {title}
 
@@ -120,6 +127,7 @@ Chapter {number}: {title}
                        or _truncate(draft))
             state = normalize_state(number, title, data, canon, aliases)
             state["summary"] = summary
+            state = _check_state(number, draft, state, canon, aliases)
             return summary, state
         except EndpointUnavailable:
             raise  # the draft is saved; abort and let a rerun resume
@@ -137,6 +145,145 @@ Chapter {number}: {title}
           "are missing.")
     summary = _truncate(draft)
     return summary, minimal_state(number, title, summary)
+
+
+def _ask_names(prompt, key, candidates):
+    """Send a focused question whose JSON answer is {key: [names]}; return the
+    set of candidates named, or None when it could not be asked/read. A name
+    like "Marcus" is accepted for the candidate "Marcus Reed"."""
+    try:
+        raw = generate_with_wait(prompt, system=prompts.VERIFIER,
+                                 agent="extractor", json_mode=True)
+        answer = extract_json(raw, expect="object").get(key)
+    except EndpointUnavailable:
+        raise
+    except Exception:
+        return None
+    if not isinstance(answer, list):
+        return None
+    named = set()
+    for item in answer:
+        said = str(item).strip().lower()
+        matches = [c for c in candidates if said == c.lower()
+                   or said in extraction_checks.name_variants(c)]
+        if len(matches) == 1:
+            named.add(matches[0])
+    return named
+
+
+def _confirm_deaths(candidates, evidence):
+    """Which of `candidates` die in this chapter? (a subset, or None)"""
+    return _ask_names(f"""Text:
+\"\"\"{evidence}\"\"\"
+
+Candidates: {', '.join(candidates)}
+
+Question: which of the candidates die in this chapter, or are reported dead as news of something that has just happened? A death long ago (backstory), a near-death, a threat, a nightmare or a figure of speech does not count. Judge only from the text; use [] if none.
+Reply with ONLY JSON: {{"dead": ["name", ...]}}""", "dead", candidates)
+
+
+def _confirm_alive(candidates, evidence):
+    """Which of `candidates` are still alive at the end of the passage? A
+    differently phrased question than _confirm_deaths: a model that wrongly
+    says someone died will usually also list them here as alive, and the
+    disagreement exposes the mistake."""
+    return _ask_names(f"""Text:
+\"\"\"{evidence}\"\"\"
+
+Candidates: {', '.join(candidates)}
+
+Question: which of the candidates are still alive at the end of this text, as far as the text shows? Someone who has died, or is reported dead, is not alive. Judge only from the text; use [] if none.
+Reply with ONLY JSON: {{"alive": ["name", ...]}}""", "alive", candidates)
+
+
+def _check_state(number, text, state, canon, aliases):
+    """Cross-check the extractor's state against the chapter text.
+
+    (book.extraction_checks, on by default.) Three things, all aimed at the
+    errors that corrupt continuity:
+      1. names the text never mentions are dropped (invented characters);
+      2. a character who died in an EARLIER chapter is not killed again (that
+         would move their death);
+      3. deaths are verified in both directions with ONE focused question per
+         chapter: the candidates are every death the model claimed plus every
+         bible character whose name sits next to death language, and the
+         model says which of them really die. A claimed death that is not
+         confirmed is dropped; a hinted character who is confirmed gets the
+         death event the extractor missed. An unanswerable question leaves
+         the model's own decision alone.
+    A chapter with no death language and no claimed death costs no extra call.
+    """
+    if not get_config()["book"].get("extraction_checks", True):
+        return state
+    variants = {n: extraction_checks.name_variants(n, aliases.get(n, ()))
+                for n in canon}
+
+    state, dropped = extraction_checks.ground_state(state, text, variants)
+    if dropped:
+        print(f"[WRITER] Chapter {number}: ignored name(s) that never appear "
+              f"in the text: {', '.join(dropped)}")
+
+    chronology = context.get("chronology") or {}
+    prior_dead = {n.lower() for n in
+                  merge_states(chronology, upto=number)["dead"]}
+    # someone who died in an earlier chapter is not "in a scene" (a funeral,
+    # a memory): the extractor lists them anyway
+    state = {**state, "present": [n for n in state["present"]
+                                  if n.lower() not in prior_dead]}
+    events = []
+    for event in state["events"]:
+        if event["type"] == "death":
+            who = [n for n in event["who"] if n.lower() not in prior_dead]
+            if not who:
+                continue                      # already dead: not a new death
+            event = {**event, "who": who}
+        events.append(event)
+    state = {**state, "events": events}
+
+    hints = extraction_checks.death_hints(text, variants)
+    claimed = list(dict.fromkeys(
+        n for e in state["events"] if e["type"] == "death" for n in e["who"]))
+    candidates = list(dict.fromkeys(
+        claimed + [n for n in hints if n.lower() not in prior_dead]))
+    if not candidates:
+        return state
+
+    # snippets around the death language; the whole chapter if a claimed
+    # death has no death language near it (the model may know better)
+    if hints and all(n in hints for n in claimed):
+        evidence = "\n...\n".join(dict.fromkeys(
+            s for n in candidates for s in hints.get(n, [])))
+    else:
+        evidence = text
+    dead = _confirm_deaths(candidates, evidence)
+    if dead is None:
+        return state
+    # A death the extractor did NOT report is added only when a second,
+    # differently phrased question agrees (the one-question version invented
+    # deaths for living characters standing near death language).
+    proposed = [n for n in candidates if n in dead and n not in claimed]
+    alive = _confirm_alive(proposed, evidence) if proposed else set()
+    adding = [n for n in proposed if alive is not None and n not in alive]
+    for name in proposed:
+        if name not in adding:
+            print(f"[WRITER] Chapter {number}: possible death of {name} "
+                  "not recorded: the two checks disagreed or could not be "
+                  "read.")
+    for name in claimed:
+        if name not in dead:
+            print(f"[WRITER] Chapter {number}: the second check does not "
+                  f"confirm that {name} dies; ignoring that death.")
+    state["events"] = [
+        {**e, "who": [n for n in e["who"] if n in dead]}
+        if e["type"] == "death" else e for e in state["events"]]
+    state["events"] = [e for e in state["events"] if e["who"]]
+    for name in adding:
+        print(f"[WRITER] Chapter {number}: the second check found a death "
+              f"the extractor missed: {name}.")
+        state["events"].append({
+            "type": "death", "who": [name],
+            "detail": "confirmed by a second check of the text"})
+    return state
 
 
 def _canonical_names():
