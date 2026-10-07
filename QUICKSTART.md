@@ -15,7 +15,7 @@ server works. Examples:
   the pipeline uses its OpenAI-compatible `/v1` API)
 - **Hosted APIs** - OpenAI, OpenRouter, etc. (set `llm.api_key` too)
 
-Then point `config.yaml` at it:
+Then point `config.yaml` at it (`config.example.yaml` lists every option):
 
 ```yaml
 llm:
@@ -25,14 +25,15 @@ llm:
 ```
 
 ### 2. Install Dependencies
+The project uses [uv](https://docs.astral.sh/uv/):
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 ### 3. Run the Project
 ```bash
-python main.py                 # bundled example seed (fantasy mystery)
-python main.py --seed my.md    # your own seed prompt
+uv run main.py                 # bundled example seed (fantasy mystery)
+uv run main.py --seed my.md    # your own seed prompt
 ```
 
 ## Writing From Your Own Seed
@@ -65,7 +66,7 @@ Third-person limited, atmospheric.
 Then run:
 
 ```bash
-python main.py --seed my_book.md
+uv run main.py --seed my_book.md
 ```
 
 See `seeds/example_seed.md` for a complete example and
@@ -75,19 +76,55 @@ the Planner generates an outline if you don't provide one.
 
 ## Command Examples
 
-- **Your seed**: `python main.py --seed story.md`
-- **Inline premise**: `python main.py --prompt "A noir thriller set on Mars..."`
-- **Chapter count**: `python main.py --seed story.md -c 3`
-- **Different model**: `python main.py --model llama3`
-- **Custom output name**: `python main.py --out my_book.md`
+- **Your seed**: `uv run main.py --seed story.md`
+- **Inline premise**: `uv run main.py --prompt "A noir thriller set on Mars..."`
+- **Chapter count**: `uv run main.py --seed story.md -c 3`
+- **Different model**: `uv run main.py --model llama3`
+- **Custom output name**: `uv run main.py --out my_book.md`
 - **View output**: `cat output/draft.md`
+- **See what happened**: `output/interim/run_stats.md` (calls, tokens, time),
+  `output/interim/diff_chapter_NN.md` (what the editor changed) and
+  `output/logs/run-*.log` (the whole console output)
+
+## Command-line Options
+
+| Option | Meaning |
+|---|---|
+| `--seed FILE` | seed prompt from a file |
+| `--prompt TEXT` | seed prompt as inline text |
+| `--demo` | bundled example seed |
+| `-c N`, `--chapters N` | chapter count (also positional: `main.py N`) |
+| `--config FILE` | config file (default `config.yaml`) |
+| `--model NAME` | override `llm.model` |
+| `--out FILE` | override the output filename |
+| `--no-resume` | start over (the old run is archived to `output/archive/`, not deleted) |
+
+## Resuming
+
+There is no `--resume` flag; it is automatic. If a run crashes, the server
+drops, or you hit Ctrl-C, just rerun the **same command** and it continues
+from the last saved chapter (progress lives in `output/interim/`).
+
+- Start over instead: add `--no-resume` (the old run is moved to `output/archive/`, not deleted).
+- Rerun with no `--seed`/`--prompt`: the saved seed is reused.
+- Run with a *different* seed or `-c` than the saved run: refused, so you
+  can't accidentally reuse another book's chapters. Add `--no-resume` to
+  start the new book.
+
+## Optional: web fact-checking
+
+Set `web_search.enabled: true` in `config.yaml` and the researcher checks
+real-world details online through SearXNG. If it isn't running and you have
+Docker, the app asks `[y/N]` before downloading and starting it (local only,
+no API key). Queries never include character names and are logged to
+`output/interim/search_chapter_NN.md`. See the README for details.
 
 ## Agents
 
 1. **Architect** - seed prompt -> story bible
 2. **Planner** - chapter outline (honors yours)
 3. **Researcher** - per-chapter lore briefs
-4. **Writer** - drafts with continuity (story facts + all previous summaries)
+4. **Writer** - drafts with continuity (story facts + recent chapter summaries)
 5. **Reviewer** - continuity check (deaths, relationships, timeline)
 6. **Editor** - lint -> revise -> polish, with a final lint report
 
@@ -98,7 +135,7 @@ the Planner generates an outline if you don't provide one.
 - If the server needs a key, set `llm.api_key` (or the `LLM_API_KEY` env var)
 
 **Slow generation**
-- Try 2 chapters first: `python main.py -c 2`
+- Try 2 chapters first: `uv run main.py -c 2`
 - Disable editing in `config.yaml` (`agents.editor.enabled: false`)
 - Use a faster model: `--model <name>`
 

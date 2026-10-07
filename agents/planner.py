@@ -10,9 +10,11 @@ Otherwise the planner generates a JSON outline from the story bible.
 import json
 import re
 
+from shared import prompts
 from shared.context import context, update_context
 from shared.llm_utils import extract_json, strip_code_fences
-from shared.llm_client import generate, get_config
+from shared.llm_client import EndpointUnavailable, generate_with_wait, \
+    get_config
 from shared.output import save_interim, save_interim_json
 
 # "## Outline", "# Story Outline:", "Outline:" section headers
@@ -88,7 +90,7 @@ def _parse_outline_span(span):
     - any other non-blank line is a wrapped continuation of the previous
       chapter's summary
     """
-    has_numbered = any(_parse_chapter_line(l) for l in span)
+    has_numbered = any(_parse_chapter_line(ln) for ln in span)
     chapters, current_part = [], ""
     for line in span:
         stripped = line.strip()
@@ -149,7 +151,7 @@ def extract_seed_outline(seed_text):
             return _sanitize_numbers(chapters)
 
     # Pass 2: loose scan for explicit "Chapter N" lines anywhere
-    loose = [p for p in (_parse_chapter_line(l) for l in lines) if p]
+    loose = [p for p in (_parse_chapter_line(ln) for ln in lines) if p]
     if len(loose) >= 2:
         return _sanitize_numbers(
             [{"number": n, "title": t, "summary": s, "part": ""}
@@ -206,7 +208,8 @@ WORLD:
 The chapters must form a complete dramatic arc (setup, rising action, climax, resolution).
 No markdown fences, no commentary - JSON only."""
 
-    raw = generate(prompt, agent="planner")
+    raw = generate_with_wait(prompt, system=prompts.PLANNER,
+                                    agent="planner")
     try:
         chapters = extract_json(raw, expect="array")
     except ValueError:
@@ -227,6 +230,14 @@ No markdown fences, no commentary - JSON only."""
     if not normalized:
         raise ValueError("planner outline had no usable chapters")
 
+    if fixed_prefix:
+        # the author's chapters win verbatim; the model only supplies the rest
+        # (it may or may not have echoed the fixed ones back)
+        extra = target - len(fixed_prefix)
+        new = (normalized[len(fixed_prefix):target]
+               if len(normalized) >= target else normalized[:extra])
+        normalized = [dict(c) for c in fixed_prefix] + new
+
     # enforce the requested count
     if len(normalized) > target:
         normalized = normalized[:target]
@@ -234,7 +245,52 @@ No markdown fences, no commentary - JSON only."""
         print(f"[PLANNER] Warning: asked for {target} chapters, "
               f"got {len(normalized)}; continuing with {len(normalized)}.")
 
-    return _assign_numbers([(None, c["title"], c["summary"]) for c in normalized])
+    return _sanitize_numbers(normalized)
+
+
+def suggest_chapter_count(seed_text, bible):
+    """Ask the LLM to read the seed and propose a chapter count.
+
+    Honors any length the seed states (e.g. "novella, 5 to 10 chapters"),
+    otherwise sizes the book from the story's scope and the configured
+    words_per_chapter. The answer is clamped to book.min_chapters /
+    book.max_chapters; on any failure book.num_chapters is used.
+    """
+    book = get_config()["book"]
+    fallback = int(book["num_chapters"])
+    lo = int(book.get("min_chapters", 3))
+    hi = max(lo, int(book.get("max_chapters", 30)))
+    words = int(book.get("words_per_chapter", 800))
+
+    prompt = f"""You are planning the structure of a novel from the creative seed below.
+Decide how many chapters the book should have.
+
+- If the seed states a desired length or chapter count (e.g. "novella, 5 to 10 chapters"), stay within it.
+- Otherwise size the book to the story: number of plot movements, characters and arcs.
+- Each chapter will be about {words} words; choose a count that lets the story reach a satisfying conclusion at that size without padding or rushing.
+
+Return ONLY JSON: {{"chapters": <integer>, "reason": "one sentence"}}
+
+Creative seed:
+\"\"\"{seed_text[:6000]}\"\"\"
+"""
+    try:
+        data = extract_json(
+            generate_with_wait(prompt, system=prompts.PLANNER,
+                               agent="planner", json_mode=True),
+            expect="object")
+        count = int(data["chapters"])
+    except EndpointUnavailable:
+        raise  # the server is down; don't plan around a guess
+    except Exception as e:
+        print(f"[PLANNER] Could not get a chapter-count suggestion ({e}); "
+              f"using book.num_chapters = {fallback}.")
+        return fallback
+    clamped = min(max(count, lo), hi)
+    note = f" (clamped from {count} to {lo}-{hi})" if clamped != count else ""
+    print(f"[PLANNER] LLM suggests {clamped} chapters{note}: "
+          f"{str(data.get('reason', '')).strip()}")
+    return clamped
 
 
 def _outline_markdown(chapters):
@@ -256,7 +312,8 @@ def run_planner(num_chapters=None):
     Priority for chapter count:
       1. explicit num_chapters argument (from --chapters / CLI)
       2. the number of chapters in the seed's own outline
-      3. config book.num_chapters
+      3. the LLM's suggestion after reading the seed (book.auto_chapters)
+      4. config book.num_chapters
 
     Returns the chapter list (possibly empty on failure).
     """
@@ -265,9 +322,21 @@ def run_planner(num_chapters=None):
     bible = context.get("bible") or {}
     seed_outline = extract_seed_outline(context.get("seed", ""))
 
+    # Resuming: keep the saved outline so chapter numbers keep matching the
+    # drafts on disk (a fresh LLM suggestion/outline could differ).
+    existing = context.get("chapters")
+    if existing and num_chapters in (None, len(existing)):
+        print(f"[PLANNER] Reusing the saved outline ({len(existing)} chapters).")
+        return existing
+
     target = num_chapters
     if target is None:
-        target = len(seed_outline) if seed_outline else cfg["book"]["num_chapters"]
+        if seed_outline:
+            target = len(seed_outline)
+        elif cfg["book"].get("auto_chapters", True):
+            target = suggest_chapter_count(context.get("seed", ""), bible)
+        else:
+            target = cfg["book"]["num_chapters"]
 
     chapters = []
     if seed_outline:
@@ -284,6 +353,8 @@ def run_planner(num_chapters=None):
                   f"expanding to {target} with the LLM.")
             try:
                 chapters = _plan_with_llm(bible, target, fixed_prefix=seed_outline)
+            except EndpointUnavailable:
+                raise
             except Exception as e:
                 print(f"[PLANNER] Expansion failed ({e}); "
                       "keeping the seed outline as-is.")
@@ -293,6 +364,8 @@ def run_planner(num_chapters=None):
               f"generating {target} chapters from the story bible.")
         try:
             chapters = _plan_with_llm(bible, target)
+        except EndpointUnavailable:
+            raise
         except Exception as e:
             print(f"[PLANNER] Error: {e}")
             return []

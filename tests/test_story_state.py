@@ -137,3 +137,22 @@ def test_strangers_language_with_only_one_of_pair_present_not_flagged():
     text = ('Sophie turned to Stuart. "Pleased to meet you," she said.')
     findings = check_chronology(5, text, merge_states(chronology, upto=5))
     assert not any(f["check"] == "already_met" for f in findings)
+
+
+# ------------------------------------------------------ windowed recap
+
+def test_story_so_far_windows_older_chapters():
+    from shared.story_state import render_story_so_far
+    summaries = {n: f"Event {n} happens. Then more detail about {n}."
+                 for n in range(1, 7)}
+    text = render_story_so_far(summaries, before=6, window=2)
+    assert "Chapter 1: Event 1 happens." in text
+    assert "more detail about 1" not in text        # old: first sentence only
+    assert "more detail about 4" in text            # in the window: full
+    assert "more detail about 3" not in text
+    assert "Chapter 6" not in text                  # never the current chapter
+
+
+def test_story_so_far_empty_for_first_chapter():
+    from shared.story_state import render_story_so_far
+    assert render_story_so_far({1: "x"}, before=1) == ""

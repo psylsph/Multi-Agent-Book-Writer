@@ -8,6 +8,7 @@ Orchestrates the multi-agent book writing workflow:
 """
 
 import argparse
+import contextlib
 import sys
 import time
 from pathlib import Path
@@ -15,11 +16,14 @@ from pathlib import Path
 from agents.architect import run_architect
 from agents.planner import run_planner
 from agents.researcher import run_researcher
-from agents.writer import run_writer
-from agents.editor import run_editor, save_book
+from agents.writer import refresh_state, run_writer
+from agents.editor import finalize_book, run_editor, save_book
+from shared import llm_client, runlog, web_search
 from shared.context import get_context, reset_context, update_context
-from shared.llm_client import get_config, load_config, preflight
-from shared.output import clear_interim, interim_dir, interim_enabled
+from shared.llm_client import EndpointUnavailable, get_config, load_config, \
+    preflight
+from shared.output import (archive_previous_run, interim_dir,
+                           interim_enabled, save_interim, save_interim_json)
 from shared.resume import has_resume, load_state, summarize_for_log
 
 EXAMPLE_SEED = Path(__file__).resolve().parent / "seeds" / "example_seed.md"
@@ -58,9 +62,60 @@ def resolve_seed_text(args):
     return EXAMPLE_SEED.read_text(encoding="utf-8")
 
 
+def _norm_seed(text):
+    """Seed text normalised for comparison (line endings, outer blanks)."""
+    return (text or "").replace("\r\n", "\n").strip()
+
+
+def check_resume(args, state, num_chapters):
+    """Decide which seed a resumed run uses and refuse unsafe resumes.
+
+    Interim files belong to ONE seed. Resuming them under a different seed
+    would skip every saved chapter and ship the old book under the new
+    bible, so that is an error unless --no-resume is given. With no seed
+    argument at all, the seed saved with the interim files is reused.
+    """
+    if not state["bible"]:
+        sys.exit("Error: the interim state in output/interim/ is unreadable "
+                 "(bible.json missing or corrupt). Rerun with --no-resume to "
+                 "start over.")
+    stored = state["bible"].get("seed", "")
+    explicit = bool(args.demo or args.seed or args.prompt)
+    if not explicit and stored:
+        print("[RESUME] Reusing the seed saved with the interim files.")
+        seed_text = stored
+    else:
+        seed_text = resolve_seed_text(args)
+        if stored and _norm_seed(seed_text) != _norm_seed(stored):
+            sys.exit(
+                "Error: output/interim/ holds a run for a DIFFERENT seed. "
+                "Resuming would reuse its chapters for this seed. Rerun with "
+                "--no-resume to start fresh, or pass the original seed to "
+                "resume.")
+    saved = state["chapters"] or []
+    if num_chapters and saved and len(saved) != num_chapters:
+        sys.exit(f"Error: the saved run has {len(saved)} chapters but "
+                 f"-c {num_chapters} was given. Rerun with --no-resume to "
+                 "start fresh, or drop -c to resume.")
+    if saved and len(state["final"]) >= len(saved):
+        print("[RESUME] The previous run already finished; the book will be "
+              "reassembled from the saved chapters. Use --no-resume to "
+              "write a new one.")
+    return seed_text
+
+
+def _research_complete(state):
+    """True when a resumed run already has a brief for every chapter, so the
+    researcher (and web search) has nothing left to do."""
+    if not state or not state["chapters"]:
+        return False
+    return all(state["research"].get(c["number"]) for c in state["chapters"])
+
+
 def agent_enabled(name):
     """Check the enabled flag for an agent in config.yaml (default True)."""
-    return get_config().get("agents", {}).get(name, {}).get("enabled", True)
+    return ((get_config().get("agents") or {}).get(name) or {}).get(
+        "enabled", True)
 
 
 def _hydrate_resume(state):
@@ -86,21 +141,92 @@ def _hydrate_resume(state):
                        set(state["completed_chapters"]))
 
 
-def run_pipeline(seed_text, num_chapters=None, resuming=False):
+@contextlib.contextmanager
+def _phase(phases, name):
+    """Record how long a pipeline phase took (even when it fails)."""
+    started = time.time()
+    try:
+        yield
+    finally:
+        phases.append((name, time.time() - started))
+
+
+def _report_stats(phases):
+    """Print and save the run's LLM usage and phase timings. Never raises."""
+    try:
+        if not llm_client.STATS:
+            return
+        print("\n" + llm_client.stats_markdown(phases))
+        save_interim("run_stats.md", llm_client.stats_markdown(phases))
+        save_interim_json("run_stats.json", llm_client.stats_data(phases))
+    except Exception as e:  # reporting must never mask the real outcome
+        print(f"[PIPELINE] Could not write run statistics: {e}")
+
+
+def review_as_you_go():
+    """True when chapters are reviewed one at a time as they are written
+    (book.review_as_you_go). Needs the editor; ignored when it is disabled."""
+    wanted = bool(get_config()["book"].get("review_as_you_go", False))
+    if wanted and not agent_enabled("editor"):
+        print("[PIPELINE] book.review_as_you_go needs the editor, which is "
+              "disabled; writing all chapters first instead.")
+        return False
+    return wanted
+
+
+def run_interleaved():
+    """Write, review and polish ONE chapter at a time.
+
+    Each chapter is drafted, put through lint/review/revise/polish, and its
+    summary and story facts are re-extracted from the final text before the
+    next chapter is written. Later chapters therefore build on the corrected
+    earlier ones instead of on unreviewed drafts. Stops at the first chapter
+    that can't be drafted; a rerun resumes from there.
+    """
+    chapters = get_context("chapters")
+    for chapter in chapters:
+        n = chapter["number"]
+        print(f"\n[PIPELINE] Chapter {n}/{len(chapters)}: {chapter['title']}")
+        run_writer(only=n)
+        if not (get_context("drafts") or {}).get(n):
+            print(f"[PIPELINE] Chapter {n} could not be drafted; stopping. "
+                  "Rerun the same command to resume from this chapter.")
+            return
+        if n in (get_context("completed_chapters") or ()):
+            continue  # edited (and refreshed) in an earlier run
+        run_editor(only=n)
+        refresh_state(n)
+    finalize_book(get_context("final"))
+
+
+def _incomplete_chapters(context, editor_on):
+    """Numbers of planned chapters that never reached their final form
+    (edited when the editor is on, drafted otherwise)."""
+    done = (set(context.get("completed_chapters") or ())
+            if editor_on else set(context.get("drafts") or ()))
+    return [c["number"] for c in context.get("chapters") or []
+            if c["number"] not in done]
+
+
+def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None):
     """
     Execute the complete book writing pipeline.
 
     Args:
         seed_text: the creative seed (premise, characters, world, outline...)
         num_chapters: explicit chapter count override (None = seed/config)
+        resuming: continue from the interim files instead of starting over
+        state: already-loaded resume state (loaded here when omitted)
     """
     print("=" * 60)
     print("MULTI-AGENT BOOK WRITER")
     print("=" * 60)
 
     start_time = time.time()
+    llm_client.reset_stats()
+    phases = []
     if resuming:
-        state = load_state()
+        state = state or load_state()
         reset_context()
         _hydrate_resume(state)
         print(f"[RESUME] Loaded {summarize_for_log(state)} from "
@@ -109,20 +235,28 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False):
             print(f"[PIPELINE] Interim artifacts: {interim_dir()}/")
     else:
         reset_context()
+        archived = archive_previous_run()  # moved aside, never deleted
+        if archived:
+            print(f"[PIPELINE] Previous run archived to {archived}/")
         if interim_enabled():
-            clear_interim()  # drop artifacts from previous runs
             print(f"[PIPELINE] Interim artifacts: {interim_dir()}/")
 
     try:
         # Step 1: Story bible from the seed prompt
         print("\n[PIPELINE] Step 1: Architect (story bible)")
         print("-" * 60)
-        run_architect(seed_text)
+        if resuming and get_context("bible"):
+            print("[PIPELINE] Story bible loaded from the saved run; "
+                  "skipping.")
+        else:
+            with _phase(phases, "architect"):
+                run_architect(seed_text)
 
         # Step 2: Chapter outline (honors the seed's own outline)
         print("\n[PIPELINE] Step 2: Planner (chapter outline)")
         print("-" * 60)
-        chapters = run_planner(num_chapters=num_chapters)
+        with _phase(phases, "planner"):
+            chapters = run_planner(num_chapters=num_chapters)
         if not chapters:
             print("[PIPELINE] Planning failed. Exiting.")
             return 1
@@ -131,19 +265,33 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False):
         if agent_enabled("researcher"):
             print("\n[PIPELINE] Step 3: Researcher (lore briefs)")
             print("-" * 60)
-            run_researcher()
+            with _phase(phases, "researcher"):
+                run_researcher()
 
-        # Step 4: Continuity-aware drafting
-        print("\n[PIPELINE] Step 4: Writer (chapter drafts)")
-        print("-" * 60)
-        run_writer()
+        interleave = review_as_you_go()
+        if interleave:
+            # Steps 4+5 together: each chapter is written, then reviewed and
+            # polished, before the next one is started.
+            print("\n[PIPELINE] Steps 4-5: Write & Review chapter by chapter")
+            print("-" * 60)
+            with _phase(phases, "write + review"):
+                run_interleaved()
+        else:
+            # Step 4: Continuity-aware drafting
+            print("\n[PIPELINE] Step 4: Writer (chapter drafts)")
+            print("-" * 60)
+            with _phase(phases, "writer"):
+                run_writer()
 
         # Step 5: Review, revise & polish (lint + reviewer + editor loop)
-        if agent_enabled("editor"):
+        if interleave:
+            pass  # already done chapter by chapter above
+        elif agent_enabled("editor"):
             print("\n[PIPELINE] Step 5: Review & Edit "
                   "(continuity, lint, revise, polish)")
             print("-" * 60)
-            run_editor()
+            with _phase(phases, "editor"):
+                run_editor()
         else:
             print("\n[PIPELINE] Step 5: Editor disabled; saving drafts.")
             drafts = get_context("drafts")
@@ -155,23 +303,38 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False):
 
         context = get_context()
         elapsed = time.time() - start_time
+        incomplete = _incomplete_chapters(context, agent_enabled("editor"))
         print("\n" + "=" * 60)
-        print("PIPELINE COMPLETE!")
+        print("PIPELINE COMPLETE!" if not incomplete
+              else "PIPELINE INCOMPLETE")
         print("=" * 60)
         print(f"Title: {context['title']}")
         print(f"Chapters: {len(context['chapters'])}")
         print(f"Drafted: {len(context['drafts'])} | "
               f"Edited: {len(context['final'])}")
         print(f"Total time: {elapsed / 60:.1f} minutes")
+        if incomplete:
+            print("Chapters not finished: "
+                  + ", ".join(str(n) for n in incomplete))
+            print("The book saved so far is partial. Fix the error above, "
+                  "then rerun the same command to resume.")
         print("=" * 60)
-        return 0
+        return 1 if incomplete else 0
 
     except KeyboardInterrupt:
-        print("\n[PIPELINE] Interrupted by user.")
+        print("\n[PIPELINE] Interrupted by user. Rerun the same command to "
+              "resume.")
         return 130
+    except EndpointUnavailable as e:
+        print(f"\n[PIPELINE] Aborted: the LLM endpoint went down ({e})")
+        print("[PIPELINE] Start/restart the server, then rerun the same "
+              "command -- resume will pick up from the last saved chapter.")
+        return 1
     except Exception as e:
         print(f"\n[PIPELINE] Error: {e}")
         raise
+    finally:
+        _report_stats(phases)
 
 
 def main():
@@ -192,7 +355,8 @@ def main():
                         help="use the bundled example seed")
     parser.add_argument("--config", default="config.yaml",
                         help="config file path (default: config.yaml)")
-    parser.add_argument("--model", help="override the LLM model")
+    parser.add_argument("--model", help="override llm.model (agents with their "
+                             "own agents.<name>.model keep it)")
     parser.add_argument("--out", dest="out_file",
                         help="override the output filename "
                              "(written under the configured output dir)")
@@ -213,18 +377,39 @@ def main():
     if args.out_file:
         cfg["output"]["filename"] = args.out_file
 
+    if cfg["output"].get("log", True):
+        log_path = runlog.start_log(Path(cfg["output"]["directory"]) / "logs")
+        if log_path:
+            print(f"[PIPELINE] Logging to {log_path}")
+    try:
+        _run(args, cfg, num_chapters)
+    finally:
+        runlog.stop_log()
+
+
+def _run(args, cfg, num_chapters):
+    resuming = not args.no_resume and has_resume()
+    state = load_state() if resuming else None
+    seed_text = (check_resume(args, state, num_chapters) if resuming
+                 else resolve_seed_text(args))
+
     # Make sure the LLM endpoint is up and the model exists before any work
     try:
         preflight()
     except (ConnectionError, RuntimeError) as e:
         sys.exit(f"Error: {e}")
 
-    resuming = not args.no_resume and has_resume()
-    seed_text = resolve_seed_text(args)
+    # Web fact-checking: make sure SearXNG is up now (offering to start it in
+    # Docker) rather than discovering a missing server mid-run.
+    if (web_search.enabled() and agent_enabled("researcher")
+            and not _research_complete(state)):
+        web_search.offer_docker_setup()
+
     exit_code = run_pipeline(seed_text, num_chapters=num_chapters,
-                             resuming=resuming)
+                             resuming=resuming, state=state)
     if exit_code == 0:
-        out = Path(cfg["output"]["directory"]) / cfg["output"]["filename"]
+        out = get_context("output_path") or \
+            Path(cfg["output"]["directory"]) / cfg["output"]["filename"]
         print(f"\n\u2713 Book written! Check {out}")
     sys.exit(exit_code or 0)
 

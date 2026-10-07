@@ -15,6 +15,7 @@ DEFAULTS = {
     "summaries": {},   # chapter number -> rolling plot summary
     "chronology": {},  # chapter number -> structured story state
     "final": [],       # edited chapters in order
+    "output_path": "", # where the final book was actually written
 }
 
 context = dict(DEFAULTS)

@@ -14,8 +14,10 @@ from difflib import SequenceMatcher
 _NOT_NAMES = {
     "The", "These", "Those", "She", "He", "They", "It", "But", "And",
     "His", "Her", "When", "What", "Then", "There", "This", "That",
-    "Chapter", "Part", "Yes", "No", "Wednesday", "Thursday", "Tuesday",
-    "Morning", "Night", "Cedar", "Rooms",
+    "Chapter", "Part", "Yes", "No", "Morning", "Night", "Evening",
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+    "Sunday", "January", "February", "March", "April", "May", "June", "July",
+    "August", "September", "October", "November", "December",
 }
 
 # words never allowed as 'banned words' when unquoted (from phrases like
@@ -38,35 +40,47 @@ _ONCE_WORDS = {"once": 1, "twice": 2}
 
 # ----------------------------------------------------------- rule extraction
 
+_QUOTED = r"\"[^\"]+\"|'[^']+'"
+_SEP = r"\s*(?:,\s*or|,|or)\s*"
+# Never [use] the word(s) <quoted-or-bare list>
+_BANNED_WORDS_RE = re.compile(
+    r"[Nn]ever\s+(?:use\s+)?the\s+words?\s+"
+    rf"((?:{_QUOTED}|\w+)(?:{_SEP}(?:{_QUOTED}|\w+))*)")
+# Never [use] "quoted" [, "quoted" ...]  (bare words are NOT taken here:
+# 'Never mention orange' must not ban 'mention')
+_BANNED_QUOTED_RE = re.compile(
+    r"[Nn]ever\s+(?:use\s+)?"
+    rf"((?:{_QUOTED})(?:{_SEP}(?:{_QUOTED}))*)")
+
+
 def extract_banned_words(constraints):
     """Pull banned words/phrases out of constraint strings.
 
     Recognizes patterns like:
       Never the words "unhurried", "unrushed", or "exactly".
+      Never use the word unhurried.
       Never "black lace".
       Never use "unhurried".
+    Unquoted terms are only accepted after "the word(s)".
     """
     banned = []
     for constraint in constraints or []:
-        for match in re.finditer(
-            r"[Nn]ever\s+(?:use\s+)?(?:the\s+words?\s+)?"
-            r"((?:\"[^\"]+\"|'[^']+'|\w+)"
-            r"(?:\s*(?:,\s*or|,|or)\s*(?:\"[^\"]+\"|'[^']+'|\w+))*)",
-            constraint,
-        ):
-            for q1, q2, bare in re.findall(
-                r'"([^"]+)"|\'([^\']+)\'|(\w+)', match.group(1)
-            ):
-                word = (q1 or q2 or bare or "").strip()
-                if not word:
-                    continue
-                if word.lower() in _BANNED_STOPWORDS:
-                    continue
-                if word.lower() in ("never", "the", "words", "or", "use"):
-                    continue
-                if word not in banned:
-                    banned.append(word)
+        for regex in (_BANNED_WORDS_RE, _BANNED_QUOTED_RE):
+            for match in regex.finditer(constraint):
+                for q1, q2, bare in re.findall(
+                    r'"([^"]+)"|\'([^\']+)\'|(\w+)', match.group(1)
+                ):
+                    word = (q1 or q2 or bare or "").strip()
+                    if not word or word.lower() in _BANNED_STOPWORDS:
+                        continue
+                    if word not in banned:
+                        banned.append(word)
     return banned
+
+
+def _term_re(term):
+    """Whole-word, case-insensitive matcher ('art' must not hit 'heart')."""
+    return re.compile(rf"(?<!\w){re.escape(term)}(?!\w)", re.IGNORECASE)
 
 
 def extract_quotas(constraints):
@@ -179,18 +193,31 @@ def _check_quota(quota, text):
 
 # ------------------------------------------------------------------ linting
 
-def _name_findings(text, bible):
-    """Flag tokens that are near-misses of bible character names."""
+def _is_name_variant(token, name_word):
+    """Plural, possessive or suffixed form of a name ('Stuarts', 'Marks',
+    'Stuartson'): a different, legitimate word, not a misspelling."""
+    t, n = token.lower(), name_word.lower()
+    return len(n) >= 3 and t.startswith(n) and len(t) - len(n) >= 1 \
+        and t != n and (t in (n + "s", n + "es") or len(t) - len(n) >= 2)
+
+
+def _name_findings(text, bible, ignore=()):
+    """Flag tokens that are near-misses of bible character names.
+
+    ignore: words never flagged (book.name_lint_ignore), e.g. a real word
+    that happens to resemble a character's name."""
+    ignored = {str(w).lower() for w in ignore}
     names = [c["name"] for c in (bible.get("characters") or [])]
     known = {word for name in names for word in name.split()}
-    known_lower = {w.lower() for w in known}
 
     findings = []
     token_counts = Counter(re.findall(r"\b[A-Z][a-z]{2,}\b", text))
     for token, count in token_counts.items():
-        if token in _NOT_NAMES or token in known:
+        if token in _NOT_NAMES or token in known or token.lower() in ignored:
             continue
         for name_word in known:
+            if _is_name_variant(token, name_word):
+                continue
             # require a shared prefix so determiners/plurals never match
             prefix = 0
             for a, b in zip(token.lower(), name_word.lower()):
@@ -236,6 +263,8 @@ def word_count_finding(text, target_words, tolerance=0.8):
     if count < minimum:
         return {
             "check": "word_count",
+            "count": count,
+            "minimum": minimum,
             "detail": f"chapter is {count} words; minimum is {minimum} "
                       f"({int(tolerance * 100)}% of the {target_words}-word "
                       "target). Expand with SUBSTANCE - deepen existing "
@@ -247,14 +276,122 @@ def word_count_finding(text, target_words, tolerance=0.8):
     return None
 
 
-def lint_chapter(number, text, bible, constraints):
+# --------------------------------------------- repetition across chapters
+
+_FUNCTION_WORDS = {
+    "the", "a", "an", "and", "or", "but", "of", "in", "on", "at", "to", "for",
+    "with", "by", "from", "as", "was", "were", "is", "are", "be", "been",
+    "had", "has", "have", "it", "its", "he", "she", "they", "them", "his",
+    "her", "their", "i", "you", "we", "me", "my", "your", "that", "this",
+    "then", "than", "so", "not", "no", "up", "down", "out", "into", "over",
+    "like", "just", "there", "what", "when", "how", "if", "do", "did",
+    "said", "all", "one", "back", "off", "would", "could", "she's", "he's",
+}
+
+
+def _tokens(text):
+    return re.findall(r"[a-z]+(?:'[a-z]+)?", text.lower())
+
+
+def _informative(gram, names):
+    """A repeated phrase only matters if it carries content: at least three
+    words that are neither function words nor character names."""
+    return sum(1 for w in gram if w not in _FUNCTION_WORDS
+               and w not in names) >= 3
+
+
+def _name_parts(names):
+    return {part.lower() for nm in names for part in re.findall(r"[A-Za-z']+", nm)}
+
+
+def _grams(tokens, n):
+    return [tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1)]
+
+
+def _spans(flags):
+    """Maximal runs of True in `flags` as (start, end) pairs."""
+    spans, i = [], 0
+    while i < len(flags):
+        if flags[i]:
+            j = i
+            while j < len(flags) and flags[j]:
+                j += 1
+            spans.append((i, j))
+            i = j
+        else:
+            i += 1
+    return spans
+
+
+def phrase_repeats(text, earlier_texts, names=(), n=6, min_prior=2, limit=5):
+    """Phrases in `text` (n or more words) already used at least `min_prior`
+    times in earlier chapters, merged into maximal spans.
+    Returns [(phrase, prior_count)], longest first."""
+    name_set = _name_parts(names)
+    prior = Counter()
+    for earlier in earlier_texts:
+        prior.update(_grams(_tokens(earlier), n))
+    tokens = _tokens(text)
+    flags, counts = [False] * len(tokens), {}
+    for i, gram in enumerate(_grams(tokens, n)):
+        if prior.get(gram, 0) >= min_prior and _informative(gram, name_set):
+            flags[i:i + n] = [True] * n
+            counts[i] = prior[gram]
+    found = [(" ".join(tokens[a:b]),
+              max(c for k, c in counts.items() if a <= k < b))
+             for a, b in _spans(flags)]
+    return sorted(found, key=lambda pc: -len(pc[0]))[:limit]
+
+
+def repeated_phrase_finding(text, earlier_texts, names=(), n=6, min_prior=2):
+    """One lint finding listing phrases this chapter reuses from earlier
+    ones, or None. The reviser is told to reword them."""
+    found = phrase_repeats(text, earlier_texts, names, n, min_prior)
+    if not found:
+        return None
+    listing = "; ".join(f'"{phrase}" (used {count}x before)'
+                        for phrase, count in found)
+    return {"check": "repeated_phrase",
+            "detail": f"{len(found)} phrase(s) already used {min_prior}+ "
+                      f"times in earlier chapters; reword them with fresh "
+                      f"imagery and phrasing: {listing}"}
+
+
+def repeated_phrases_in_book(chapter_texts, names=(), n=6, min_total=3,
+                             min_chapters=2, limit=8):
+    """Phrases used at least `min_total` times across at least
+    `min_chapters` chapters. chapter_texts is {number: text}. Returns
+    [(phrase, count, chapters)], most frequent first (for the lint report)."""
+    name_set = _name_parts(names)
+    total, where = Counter(), {}
+    token_lists = {k: _tokens(v) for k, v in chapter_texts.items()}
+    for k, toks in token_lists.items():
+        for gram in _grams(toks, n):
+            total[gram] += 1
+            where.setdefault(gram, set()).add(k)
+    keep = {g for g, c in total.items() if c >= min_total
+            and len(where[g]) >= min_chapters and _informative(g, name_set)}
+    phrases, chapters_of = Counter(), {}
+    for k, toks in token_lists.items():
+        flags = [False] * len(toks)
+        for i, gram in enumerate(_grams(toks, n)):
+            if gram in keep:
+                flags[i:i + n] = [True] * n
+        for a, b in _spans(flags):
+            phrase = " ".join(toks[a:b])
+            phrases[phrase] += 1
+            chapters_of.setdefault(phrase, set()).add(k)
+    ranked = sorted(phrases, key=lambda ph: (-phrases[ph], -len(ph)))
+    return [(ph, phrases[ph], sorted(chapters_of[ph])) for ph in ranked[:limit]]
+
+
+def lint_chapter(number, text, bible, constraints, ignore_names=()):
     """Run all deterministic checks on one chapter. Returns findings list."""
     findings = []
 
     banned = extract_banned_words(constraints)
     for word in banned:
-        hits = [m.start() for m in re.finditer(re.escape(word), text,
-                                               re.IGNORECASE)]
+        hits = [m.start() for m in _term_re(word).finditer(text)]
         if hits:
             findings.append({
                 "check": "banned_word",
@@ -268,15 +405,16 @@ def lint_chapter(number, text, bible, constraints):
         if count > quota["max"]:
             findings.append({"check": "quota", "detail": detail})
 
-    findings.extend(_name_findings(text, bible))
+    findings.extend(_name_findings(text, bible, ignore_names))
     return findings
 
 
-def lint_book(full_text, bible, constraints):
+def lint_book(full_text, bible, constraints, ignore_names=(),
+              chapter_texts=None):
     """Book-scope checks: banned words and volume-level quotas."""
     findings = []
     for word in extract_banned_words(constraints):
-        hits = len(re.findall(re.escape(word), full_text, re.IGNORECASE))
+        hits = len(_term_re(word).findall(full_text))
         if hits:
             findings.append({
                 "check": "banned_word",
@@ -288,7 +426,15 @@ def lint_book(full_text, bible, constraints):
         count, detail = _check_quota(quota, full_text)
         if count > quota["max"]:
             findings.append({"check": "quota", "detail": detail})
-    findings.extend(_name_findings(full_text, bible))
+    findings.extend(_name_findings(full_text, bible, ignore_names))
+    if chapter_texts:
+        names = [c.get("name", "") for c in bible.get("characters") or []]
+        for phrase, count, chapters in repeated_phrases_in_book(
+                chapter_texts, names):
+            findings.append({
+                "check": "repeated_phrase",
+                "detail": f'"{phrase}" appears {count}x across chapters '
+                          f"{', '.join(map(str, chapters))}"})
     return findings
 
 
@@ -296,15 +442,29 @@ def lint_book(full_text, bible, constraints):
 
 # A dead character doing something only a living person can do. Bare
 # mentions (memories, grief, dialogue ABOUT them) are fine.
-_ALIVE_ACTION_RE = re.compile(
-    r"\b({name})\b[^.!?\n]{{0,40}}?"
-    r"\b(said|says|asked|replied|answered|shouted|whispered|smiled|laughed|"
-    r"walked|ran|stood|sat|turned|looked|watched|opened|closed|took|put|"
-    r"held|grabbed|touched|kissed|wore|arrived|entered|left)\b"
-    r"|\b(said|asked|whispered|replied)\s+{name}\b"
-    r"|\b{name}'s\s+(voice|hand|eyes|face|smile)\b",
-    re.IGNORECASE,
+_ALIVE_VERBS = (
+    "said|says|asked|replied|answered|shouted|whispered|smiled|laughed|"
+    "walked|ran|stood|sat|turned|looked|watched|opened|closed|took|put|"
+    "held|grabbed|touched|kissed|wore|arrived|entered|left"
 )
+
+
+def _alive_action_re(name):
+    """Regex for `name` doing something only a living person can do.
+
+    The name is matched case-sensitively (a dead 'Rose' must not match 'the
+    sun rose'); verbs are case-insensitive. Possessives ("Anna's mother
+    walked") are excluded from the verb branch, and the gap between name and
+    verb may not cross sentence punctuation, semicolons or dialogue quotes.
+    """
+    n = re.escape(name)
+    return re.compile(
+        rf"\b{n}\b(?![\'\u2019]s)[^.!?;\n\"\u201c\u201d]{{0,30}}?"
+        rf"\b(?i:{_ALIVE_VERBS})\b"
+        rf"|(?i:\b(?:said|asked|whispered|replied)\s+){n}\b"
+        rf"|\b{n}[\'\u2019]s\s+(?i:voice|hand|eyes|face|smile)\b"
+    )
+
 
 # Strangers-language between people who have already met.
 _FIRST_MEETING_RE = re.compile(
@@ -316,7 +476,7 @@ _FIRST_MEETING_RE = re.compile(
 )
 
 
-def check_chronology(number, text, cumulative):
+def check_chronology(number, text, cumulative, aliases=None):
     """Deterministic timeline checks for chapter `number` against the
     cumulative state from all EARLIER chapters.
 
@@ -331,8 +491,11 @@ def check_chronology(number, text, cumulative):
     for name, died_ch in (cumulative.get("dead") or {}).items():
         if number <= died_ch:
             continue  # death happens here or later; fine
-        pattern = _ALIVE_ACTION_RE.pattern.replace("{name}", re.escape(name))
-        hits = re.findall(pattern, text, re.IGNORECASE)
+        # a multi-word bible name is also referred to by its first name
+        variants = [name] + ([name.split()[0]] if len(name.split()) > 1
+                             and len(name.split()[0]) > 2 else [])
+        variants += (aliases or {}).get(name, [])  # declared nicknames
+        hits = [h for v in variants for h in _alive_action_re(v).findall(text)]
         if hits:
             findings.append({
                 "check": "dead_character",
@@ -347,11 +510,11 @@ def check_chronology(number, text, cumulative):
         # only flag if two people who already met are both on page
         present_names = set(re.findall(r"\b[A-Z][a-z]{2,}\b", text))
         for key, met_ch in met_pairs.items():
-            a, b = key.split("+")
-            if a.capitalize() in present_names and b.capitalize() in present_names:
+            a, b = (part.split()[0].capitalize() for part in key.split("+"))
+            if a in present_names and b in present_names:
                 findings.append({
                     "check": "already_met",
-                    "detail": f"{a.capitalize()} & {b.capitalize()} first met "
+                    "detail": f"{a} & {b} first met "
                               f"in Ch{met_ch}, but Ch{number} uses "
                               "first-meeting/stranger language between them",
                 })

@@ -1,7 +1,5 @@
 """Tests for resume state load/save."""
 
-import json
-from pathlib import Path
 
 from shared.llm_client import load_config
 from shared.output import save_interim, save_interim_json
@@ -27,7 +25,7 @@ def test_load_state_empty_when_no_interim(tmp_path):
 
 
 def test_save_and_load_round_trip(tmp_path):
-    out = _use_config(tmp_path)
+    _use_config(tmp_path)
     bible = {"title": "Test", "characters": [{"name": "Aria"}], "seed": "x"}
     chapters = [{"number": 1, "title": "One", "summary": "begin"},
                 {"number": 2, "title": "Two", "summary": "end"}]
@@ -53,3 +51,19 @@ def test_save_and_load_round_trip(tmp_path):
     assert state["completed_chapters"] == {1, 2}
     assert state["summaries"] == summaries
     assert state["chronology"] == chronology
+
+
+def test_strip_heading_leaves_headingless_text_alone():
+    from shared.resume import _strip_heading
+    assert _strip_heading("First paragraph.\n\nSecond.") == \
+        "First paragraph.\n\nSecond."
+    assert _strip_heading("## Chapter 1: One\n\nBody.") == "Body."
+
+
+def test_interim_writes_are_atomic_and_leave_no_temp_files(tmp_path):
+    out = _use_config(tmp_path)
+    save_interim("draft_chapter_01.md", "one")
+    save_interim("draft_chapter_01.md", "two")
+    files = sorted(p.name for p in (out / "interim").iterdir())
+    assert files == ["draft_chapter_01.md"]
+    assert (out / "interim" / "draft_chapter_01.md").read_text() == "two"

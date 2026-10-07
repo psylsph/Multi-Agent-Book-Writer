@@ -104,3 +104,53 @@ def test_word_count_finding_passes_at_minimum():
 
 def test_word_count_finding_disabled_without_target():
     assert word_count_finding("a few words", None, 0.8) is None
+
+
+# ------------------------------------------- banned words: whole words only
+
+def test_banned_word_matches_whole_words_only():
+    bible = {"characters": []}
+    findings = lint_chapter(1, "It hurt his heart. Part of him knew.", bible,
+                            ['Never use "art".'])
+    assert findings == []
+    findings = lint_chapter(1, "The art was lovely.", bible,
+                            ['Never use "art".'])
+    assert [f["check"] for f in findings] == ["banned_word"]
+
+
+def test_bare_words_only_banned_after_the_word():
+    assert extract_banned_words(["Never mention orange things."]) == []
+    assert extract_banned_words(["Never use passive voice."]) == []
+    assert extract_banned_words(["Never use the word unhurried."]) == \
+        ["unhurried"]
+
+
+# ----------------------------------------------------- dead-character check
+
+def _dead_hits(text, name="Anna"):
+    from shared.consistency import check_chronology
+    cum = {"dead": {name: 2}, "met_pairs": {}}
+    return [f for f in check_chronology(5, text, cum)
+            if f["check"] == "dead_character"]
+
+
+def test_dead_character_acting_alive_is_flagged_across_a_gap():
+    assert _dead_hits("Anna said hello.")
+    assert _dead_hits("Anna slowly turned around.")        # gap before verb
+    assert _dead_hits("Anna, pale and cold, walked in.")
+    assert _dead_hits('"Fine," said Anna.')
+    assert _dead_hits("Anna's voice carried down the hall.")
+
+
+def test_dead_character_false_positives_avoided():
+    assert not _dead_hits("She remembered Anna; he walked away.")
+    assert not _dead_hits("Anna's mother walked in.")        # possessive
+    assert not _dead_hits("The funeral was for Anna. He left early.")
+    # name match is case-sensitive: the verb 'rose' is not the dead 'Rose'
+    assert not _dead_hits("The sun rose and she walked on.", name="Rose")
+    assert _dead_hits("Rose stood at the door.", name="Rose")
+
+
+def test_word_count_finding_has_structured_fields():
+    finding = word_count_finding("word " * 10, 100, 0.8)
+    assert finding["count"] == 10 and finding["minimum"] == 80

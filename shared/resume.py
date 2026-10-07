@@ -35,15 +35,16 @@ def _read_json(path):
 
 
 def _strip_heading(text):
-    """Remove a leading '## Chapter N: Title\\n\\n' if present."""
+    """Remove a leading markdown heading ('## Chapter N: Title' or
+    '# Lore Brief - Chapter N: Title') and the blank line after it. Text
+    without a leading heading (e.g. hand-edited) is returned untouched."""
+    if not text.lstrip().startswith("#"):
+        return text
     parts = text.split("\n\n", 1)
-    return parts[1] if len(parts) == 2 else text
+    return parts[1] if len(parts) == 2 else ""
 
 
-def _strip_lore_heading(text):
-    """Remove a leading '# Lore Brief - Chapter N: Title\\n\\n' if present."""
-    parts = text.split("\n\n", 1)
-    return parts[1] if len(parts) == 2 else text
+_strip_lore_heading = _strip_heading
 
 
 def load_state():

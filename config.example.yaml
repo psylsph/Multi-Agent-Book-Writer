@@ -1,0 +1,188 @@
+# Multi-Agent Book Writer - example configuration
+#
+# Every option is listed here with its default and what it does. Copy this
+# file to config.yaml (or to any path and pass --config) and edit it. Every
+# key is optional: anything you leave out falls back to the default shown.
+
+# ----------------------------------------------------------------- book
+book:
+  # Chapter count, in order of priority:
+  #   1. -c / --chapters on the command line
+  #   2. the chapters in the seed's own outline
+  #   3. the LLM's suggestion after reading the seed (auto_chapters)
+  #   4. num_chapters below
+  auto_chapters: true     # let the LLM suggest a count when 1 and 2 don't apply
+  min_chapters: 3         # clamp for the LLM's suggestion
+  max_chapters: 30
+  num_chapters: 5         # fallback if auto_chapters is false or the call fails
+
+  # Target length per chapter. The writer is asked for between
+  # words_per_chapter * word_count_tolerance and words_per_chapter * 1.2.
+  words_per_chapter: 2000
+  # Enforced minimum, as a fraction of words_per_chapter. Shorter chapters are
+  # sent back for substantive expansion (never padding).
+  word_count_tolerance: 0.8
+
+  # Review/revise rounds per chapter in the editor (0 disables revision).
+  revision_rounds: 2
+  # Extra rounds granted ONLY for length expansion, while each still adds >= 15%.
+  extra_length_rounds: 2
+
+  # false: write ALL chapters first, then review/revise/polish them all.
+  # true:  write, review and polish ONE chapter at a time, then re-extract its
+  #        summary and story facts from the final text before writing the next.
+  #        Later chapters build on corrected earlier ones, so a drift is caught
+  #        right after it happens. Costs one extra LLM call per chapter and you
+  #        don't get a complete draft until the end. Needs the editor enabled.
+  review_as_you_go: false
+
+  # What the reviewer checks in each chapter (any subset, in any order):
+  #   continuity  deaths, who has met, timeline, setting against earlier chapters
+  #   outline     the chapter delivers the beats its outline entry/brief require
+  #   constraints rules a word-counter can't check (POV, tense, content, style)
+  review_checks: [continuity, outline, constraints]
+
+  # Reword phrases a chapter reuses from earlier ones (6+ word phrases already
+  # used twice before; and a book-wide list in lint_report.md).
+  repetition_lint: true
+
+  # Words the name-typo lint must never flag (it flags near-misses of
+  # character names, e.g. "Kirstie" for "Kirsty"). Plurals and possessives
+  # ("Stuarts") are already skipped; list real words that merely resemble a
+  # name here.
+  name_lint_ignore: []
+
+  # How many of the most recent chapter summaries the writer and reviewer see
+  # in full; older chapters are cut to one sentence to keep prompts bounded.
+  summary_window: 8
+
+# ------------------------------------------------------------------ llm
+# Any OpenAI-compatible endpoint: LM Studio, llama.cpp server, vLLM, Ollama
+# (/v1 API), OpenAI, OpenRouter, ...
+llm:
+  # Server URL. Both "http://host:port" and "https://host/v1" work;
+  # /v1/chat/completions is appended.
+  #   LM Studio / llama.cpp  http://localhost:1234 (LM Studio), :8080 (llama.cpp)
+  #   Ollama                 http://localhost:11434
+  #   OpenAI                 https://api.openai.com
+  #   OpenRouter             https://openrouter.ai/api
+  base_url: "http://localhost:1234"
+  model: "your-model-name"      # must be a model the server offers
+  # API key for hosted services. Leave empty for local servers. Use
+  # "env:MY_VAR" to read an environment variable (LLM_API_KEY is the fallback).
+  api_key: ""
+
+  timeout: 300            # seconds to wait for each response (with stream: true,
+                          # seconds without ANY data, so it can be much shorter)
+  retries: 2              # retries per request, with backoff
+  endpoint_wait: 300      # seconds to wait for a downed/reloading server
+                          # before a phase aborts (rerun to resume)
+  # max_tokens: 8192      # optional per-request cap; unset = server default.
+                          # Replies cut off by a length limit are continued
+                          # automatically (up to 3 times) for chapter text.
+
+  # Stream replies as they are generated. Prints a progress line (tokens so
+  # far, tokens/s) every ~20 s, and detects a stalled server in `timeout`
+  # seconds instead of waiting out a whole response. Off by default.
+  stream: false
+
+  # Ask the server to enforce JSON output on the calls that return a JSON
+  # object (architect, extractor, reviewer, ...). Fewer parse failures, but
+  # needs server support; if the server rejects it the run carries on without.
+  json_mode: false
+
+  # The model's context size in tokens. When set, a prompt that nears it (the
+  # bible, facts and recap grow with the book) triggers a warning before the
+  # server fails on it. Estimates are calibrated from the usage the server
+  # reports.
+  # context_window: 32768
+
+  # Reasoning models (Qwen3.x style). Both are sent as chat_template_kwargs,
+  # and only when set. llama.cpp needs --jinja.
+  # reasoning_effort: low # low | medium | xhigh (the template default is xhigh)
+  # enable_thinking: false   # hard off-switch; not honoured by every model
+
+# ---------------------------------------------------------------- agents
+# Per-agent settings. Any agent can use its own model with `model:` (default:
+# llm.model), for example a different model for the reviewer than the one that
+# wrote the chapter, or a small fast one for the extractor. Models must be on
+# the same server (llm.base_url); every one you set is checked at startup. A
+# server that swaps models on demand needs time to load them, so keep
+# llm.timeout and llm.endpoint_wait generous.
+#
+# Temperature is only sent to the server when you set it
+# here; leave it commented out to use the model's own default sampling (some
+# models have their best settings built in).
+agents:
+  architect:              # story bible from the seed
+    # model: other-model
+    # temperature: 0.7
+
+  planner:                # outline and chapter-count suggestion
+    # model: other-model
+    # temperature: 0.7
+
+  researcher:             # per-chapter lore briefs
+    # model: other-model
+    enabled: true         # false skips the briefs (faster, less context)
+    # temperature: 0.7
+
+  writer:                 # chapter prose
+    # model: other-model
+    # temperature: 1.0
+
+  extractor:              # JSON summary + continuity facts after each chapter
+    # model: other-model
+    # temperature: 0.2    # a low value gives more reliable JSON
+
+  reviewer:               # continuity review of each chapter
+    # model: other-model
+    enabled: true         # false leaves only the deterministic lint
+    # temperature: 0.7
+
+  editor:                 # lint -> revise -> polish
+    # model: other-model
+    enabled: true         # false saves the raw drafts unedited
+    # temperature: 0.7
+
+# ------------------------------------------------------------ web_search
+# Lets the researcher fact-check REAL-WORLD details (places, professions,
+# procedures, history) through a SearXNG instance. Off by default.
+#   - Only generic queries are sent: the model is told never to include story
+#     details, and any query containing a character name is dropped.
+#   - Results are passed to the model as quoted data. Your invented world
+#     always wins; only real-world errors are flagged.
+#   - What was searched is saved to interim/search_chapter_NN.md.
+#   - Needs agents.researcher.enabled: true.
+web_search:
+  enabled: false
+  searxng_url: "http://localhost:8888"
+  # If SearXNG isn't reachable at a local URL and Docker is installed, the app
+  # can start it for you (bound to 127.0.0.1 only):
+  #   ask - offer on a terminal, y/N (default); never prompts without one
+  #   yes - download and start without asking
+  #   no  - never touch Docker
+  auto_start: ask
+  docker_image: "searxng/searxng"
+  # Story-specific names (characters, invented places like "Willow Rooms", other
+  # proper nouns from your world/outline) are never allowed in a query: such
+  # queries are dropped and logged. Real places you DO want searched go here:
+  allow_terms: []         # e.g. ["Hampshire", "Surrey", "England", "UK"]
+  # Each verified claim gets a second, independent model check ("does this
+  # quote, by itself, directly support/contradict it?"); a disagreement drops
+  # the fact. Costs one short call per verified claim.
+  double_check: true
+  queries_per_chapter: 3
+  results_per_query: 4
+  snippet_chars: 300      # per result
+  categories: "general"
+  timeout: 15             # seconds per search
+
+# ---------------------------------------------------------------- output
+output:
+  directory: "output"
+  filename: "draft.md"    # the assembled book, under directory
+  overwrite: true         # false appends -1, -2, ... instead of overwriting
+  log: true               # copy all console output to <directory>/logs/run-<time>.log
+  interim: true           # progress artifacts in <directory>/interim/. Also
+                          # what resume reads: with false, runs can't resume.

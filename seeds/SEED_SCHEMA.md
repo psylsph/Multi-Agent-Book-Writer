@@ -87,11 +87,19 @@ the description.
 
 - Put the role at the **start of the description** (`- **Aria** -
   protagonist. 29, ...`) — `protagonist` / `antagonist` / `supporting`
-  there is picked up as the role. A parenthetical directly after the bold
-  name (`**Aria** (protagonist) - ...`) is ignored by the parser.
-- Parentheses **inside** the bold (`**Lisa (the third)**`) become part of
-  the name — useful for disambiguating epithets, but the name reaches the
-  writer exactly as written.
+  there is picked up as the role.
+- A bracketed note after the name, inside or outside the bold
+  (`**Lisa (the third)**`, `**Lisa** (the third)`), is **not part of the
+  name**. If it is a single capitalised word (`**Elizabeth (Liz)**`) or
+  starts with `aka` / `known as` / `called` / `goes by`, it is an **alias**;
+  otherwise it is appended to the description (`... (the third)`). So
+  `**Carole (from No.12)**` is the character `Carole`.
+- **Nicknames**: besides the bracket form, a description can say `known as
+  Liz`, `aka Liz`, `called Liz`, `nicknamed Liz` or `goes by Liz`. Aliases
+  are shown to the writer ("Elizabeth (also called Liz)") and used to track
+  deaths, meetings and relationships under one name. Common short forms
+  (Liz/Beth for Elizabeth, Bob for Robert, Stu for Stuart, ...) are
+  recognised without being declared.
 - **Names must be bold** (`**Name**`) to be captured; a plain `- Aria - ...`
   line is ignored by the deterministic parser.
 
@@ -178,7 +186,10 @@ Rules, in order of application:
 
 1. `--chapters N` (or the legacy positional `N`) if given — always wins
 2. otherwise, the number of chapters in the seed outline
-3. otherwise `book.num_chapters` from `config.yaml` (default 5)
+3. otherwise the LLM reads the seed and suggests a count (`book.auto_chapters`,
+   clamped to `book.min_chapters`–`book.max_chapters`; honors a stated length
+   such as "5 to 10 chapters")
+4. otherwise `book.num_chapters` from `config.yaml` (default 5)
 
 If you ask for **more** chapters than the outline has, the planner expands
 it via the LLM (your chapters stay fixed as the opening run). If you ask for

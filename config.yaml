@@ -1,62 +1,63 @@
-# Configuration for Multi-Agent Book Writer
+# Multi-Agent Book Writer - settings for this machine.
+# config.example.yaml documents every option and its default.
 
-# Book settings
 book:
-  # Title is taken from the seed prompt (story bible); this is only a fallback.
-  title: ""
-  # Chapters used when the seed has no outline and no -c flag is given.
-  num_chapters: 5
-  # Target chapter length; the writer is told 70%-130% of this value.
   words_per_chapter: 2000
-  # Enforced minimum as a fraction of words_per_chapter. Chapters below
-  # this are flagged by the lint and sent back for substantive expansion
-  # (never padding) during review/revision rounds.
-  word_count_tolerance: 0.8
-  # Extra revision rounds granted ONLY for length expansion (beyond
-  # revision_rounds), continuing while each round still adds >= 15%.
-  extra_length_rounds: 2
-  # Review/revise rounds per chapter in the editor (lint + reviewer
-  # findings are fixed; 0 disables revision).
+  word_count_tolerance: 0.8     # chapters under 80% of the target are expanded
   revision_rounds: 2
+  extra_length_rounds: 2
+  summary_window: 8
+  review_as_you_go: true       # true: write + review each chapter in turn
+  # Chapter count: -c flag > seed outline > LLM suggestion > num_chapters.
+  auto_chapters: true
+  min_chapters: 3
+  max_chapters: 30
+  num_chapters: 5
 
-# LLM settings (any OpenAI-compatible endpoint: LM Studio, llama.cpp
-# server, vLLM, Ollama's /v1 API, OpenAI, OpenRouter, ...)
 llm:
-  base_url: "http://192.168.1.225:1234"   # server base URL; /v1/chat/completions is appended
-  api_key: ""          # leave empty for local servers; 'env:MY_VAR' reads an env var (LLM_API_KEY is the fallback)
-  model: "qwen3.5-9b-the-defiant-fable-uncensored-heretic-neo-imatrix-max-mtp"
-  timeout: 600            # seconds per request
-  retries: 2              # retries per request (with backoff)
+  base_url: "http://localhost:8080"
+  model: "qwen36-i1-champ"
+  api_key: ""                   # empty for local servers; "env:VAR" for hosted
+  timeout: 3000                 # seconds per request
+  retries: 2
+  endpoint_wait: 300            # seconds to wait for a downed/reloading server
+  # Qwen3.x thinking models: low | medium | xhigh (template default: xhigh).
+  # llama.cpp needs --jinja. Comment out to use the template default.
+  reasoning_effort: xhigh
+  # enable_thinking: false      # hard off-switch (not honoured on Qwen3.8)
 
-# Agent settings (temperature + enable/disable per agent)
+# Temperatures are only sent when set, so the model's own defaults apply
+# unless you uncomment one.
 agents:
   architect:
-    enabled: true         # builds the story bible from the seed
-    temperature: 0.7
-
+    # temperature: 0.7
   planner:
+    # temperature: 0.7
+  researcher:
     enabled: true
-    temperature: 0.7
-
-  researcher:             # lore briefs per chapter
-    enabled: true
-    temperature: 0.7
-
+    # temperature: 0.7
   writer:
-    enabled: true
-    temperature: 1.0
-
+    # temperature: 1.0
+  extractor:                    # per-chapter JSON continuity extraction
+    # temperature: 0.2
   reviewer:
     enabled: true
-    temperature: 0.7
-
+    # temperature: 0.7
   editor:
-    enabled: true         # if disabled, raw drafts are saved unedited
-    temperature: 0.7
+    enabled: true               # false saves the raw drafts unedited
+    # temperature: 0.7
 
-# Output settings
+# Researcher fact-checking of real-world details via SearXNG (see
+# config.example.yaml). If it isn't running, the app offers to start it in Docker.
+web_search:
+  enabled: true
+  searxng_url: "http://localhost:8888"
+  auto_start: ask               # ask | yes | no
+  # Story names never go into queries; real places you want searched go here.
+  allow_terms: [Hampshire, Surrey, England, UK, English, British]
+
 output:
   directory: "output"
   filename: "draft.md"
-  overwrite: true         # false -> append -1, -2... instead of clobbering
-  interim: true           # write progress artifacts to <directory>/interim/
+  overwrite: true               # false appends -1, -2, ... instead
+  interim: true                 # progress files; also what resume reads

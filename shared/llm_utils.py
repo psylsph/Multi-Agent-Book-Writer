@@ -160,6 +160,38 @@ _CHAR_LINE_RE = re.compile(
 _HEADING_RE = re.compile(r"^#{1,6}\s")
 
 
+_ALIAS_INTRO = r"(?:a\.?k\.?a\.?|known as|called|nicknamed|goes by|also called)"
+_ALIAS_DESC_RE = re.compile(
+    rf"\b(?i:{_ALIAS_INTRO})\s+[\"'\u201c]?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)")
+_ALIAS_QUAL_RE = re.compile(rf"^{_ALIAS_INTRO}\s+(.+)$", re.IGNORECASE)
+
+
+def find_aliases(qualifier, description):
+    """Nicknames declared in a seed character line.
+
+    Recognised: a bracketed qualifier that is a single capitalised word
+    ('**Elizabeth (Liz)**') or starts with aka / known as / called / goes by,
+    and the same phrases inside the description ('...known as Liz...').
+    Returns (aliases, qualifier_was_alias).
+    """
+    aliases, used = [], False
+    qualifier = (qualifier or "").strip()
+    m = _ALIAS_QUAL_RE.match(qualifier)
+    if m:
+        aliases.append(m.group(1).strip(" \"'"))
+        used = True
+    elif re.fullmatch(r"[A-Z][a-z]+", qualifier):
+        aliases.append(qualifier)
+        used = True
+    aliases += [a.strip() for a in _ALIAS_DESC_RE.findall(description or "")]
+    seen, out = set(), []
+    for a in aliases:
+        if a and a.lower() not in seen:
+            seen.add(a.lower())
+            out.append(a)
+    return out, used
+
+
 def extract_seed_characters(seed_text):
     """Deterministically extract '**Name** - description' bullets from a
     Characters section. Wrapped continuation lines are joined onto the
@@ -178,23 +210,46 @@ def extract_seed_characters(seed_text):
             if m:
                 name = m.group(1).strip()
                 desc = (m.group(3) or "").strip()
+                # a bracketed qualifier is not part of the name:
+                # '**Carole (from No.12)**' -> 'Carole' + '(from No.12)'
+                qualifier = (m.group(2) or "").strip()
+                paren = re.match(r"^(.+?)\s*\((.+?)\)\s*$", name)
+                if paren:
+                    name = paren.group(1).strip()
+                    qualifier = qualifier or paren.group(2).strip()
                 # strip a leading role word like 'protagonist.' / 'antagonist.'
                 role = ""
                 role_m = re.match(r"^(protagonist|antagonist|supporting)\b",
                                   desc, re.IGNORECASE)
                 if role_m:
                     role = role_m.group(1).lower()
+                aliases, qualifier_is_alias = find_aliases(qualifier, desc)
+                if qualifier and not qualifier_is_alias:
+                    desc = f"{desc} ({qualifier})"
                 if name and name.lower() not in \
                         (c["name"].lower() for c in characters):
                     current = {"name": name, "role": role,
-                               "description": desc}
+                               "description": desc, "aliases": aliases}
                     characters.append(current)
                 else:
                     current = None
             elif current is not None and stripped:
                 # wrapped continuation of the previous description
                 current["description"] += " " + stripped
+    for c in characters:  # aliases mentioned on wrapped description lines
+        found, _ = find_aliases("", c["description"])
+        c["aliases"] = list(dict.fromkeys(c.get("aliases", []) + found))
     return characters
+
+
+def same_character(a, b):
+    """True when two names plausibly denote one bible character: equal
+    ignoring case and bracketed qualifiers, or sharing a first name
+    ('Lisa' and 'Lisa Hale')."""
+    def words(name):
+        return re.sub(r"\(.*?\)", " ", str(name)).lower().split()
+    wa, wb = words(a), words(b)
+    return bool(wa and wb and (wa == wb or wa[0] == wb[0]))
 
 
 def render_bible(bible):
@@ -204,7 +259,9 @@ def render_bible(bible):
 
     char_lines = "\n".join(
         "- {name}{role}{desc}".format(
-            name=c.get("name", "?"),
+            name=c.get("name", "?")
+            + (f" (also called {', '.join(c['aliases'])})"
+               if c.get("aliases") else ""),
             role=f" ({c['role']})" if c.get("role") else "",
             desc=f": {c['description']}" if c.get("description") else "",
         )

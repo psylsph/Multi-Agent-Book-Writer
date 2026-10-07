@@ -1,0 +1,32 @@
+[project]
+name = "multi-agent-book-writer"
+version = "0.1.0"
+description = "Multi-agent pipeline that turns a seed prompt into a drafted book using any OpenAI-compatible LLM endpoint."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31.0",
+    "PyYAML>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.16.10",
+]
+
+[tool.uv]
+# An application, not a library: install dependencies only, not the project.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# Bug-catching rules only (undefined names, unused imports/variables, ...).
+# Style is left to the code around it.
+select = ["E4", "E7", "E9", "F"]

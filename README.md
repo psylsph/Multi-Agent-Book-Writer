@@ -45,14 +45,21 @@ multi-agent-book-writer/
 │   ├── llm_utils.py        # JSON extraction / output cleanup helpers
 │   ├── story_state.py      # chronology: merge/render story facts
 │   ├── consistency.py      # deterministic lint: bans, quotas, timeline
+│   ├── web_search.py       # SearXNG search + optional Docker setup
+│   ├── prompts.py          # every agent's system prompt (role + rules)
+│   ├── config_schema.py    # known config options; warns about typos
+│   ├── runlog.py           # copies console output to a log file
 │   └── output.py           # interim artifacts + bible formatting
 ├── seeds/
 │   ├── SEED_SCHEMA.md      # seed format reference
 │   └── example_seed.md     # example seed prompt (a fantasy mystery)
-├── tests/                  # 54 unit tests (no model needed)
+├── tests/                  # offline tests; fake_llm.py is an in-process fake server
+├── ROADMAP.md              # what is planned and what is known to be missing
 ├── output/                 # generated books + interim progress artifacts
-├── config.yaml             # model, temperatures, timeouts, output settings
-├── requirements.txt
+├── config.yaml             # your settings: model, temperatures, timeouts, output
+├── config.example.yaml     # every option documented, with defaults
+├── pyproject.toml          # dependencies (managed with uv)
+├── uv.lock
 └── README.md
 ```
 
@@ -60,7 +67,7 @@ multi-agent-book-writer/
 
 ### Prerequisites
 
-- Python 3.9+
+- Python 3.11+ and [uv](https://docs.astral.sh/uv/)
 - An OpenAI-compatible LLM server (LM Studio, llama.cpp server, vLLM,
   Ollama, OpenAI, OpenRouter, ...) reachable over HTTP
 
@@ -74,8 +81,9 @@ multi-agent-book-writer/
 
 2. **Point it at your LLM server**
 
-   Edit `config.yaml` and set `llm.base_url` to your server (the
-   OpenAI-compatible `/v1/chat/completions` path is appended automatically).
+   Edit `config.yaml` (`config.example.yaml` documents every option) and set
+   `llm.base_url` to your server (the OpenAI-compatible
+   `/v1/chat/completions` path is appended automatically).
    Set `llm.model` to a model the server offers, and `llm.api_key` if the
    server requires one (`env:MY_VAR` reads it from an environment variable;
    `LLM_API_KEY` is the fallback).
@@ -88,7 +96,7 @@ multi-agent-book-writer/
 
 3. **Install Python dependencies**
    ```bash
-   pip install -r requirements.txt
+   uv sync    # install uv first: https://docs.astral.sh/uv/
    ```
 
 ## Usage
@@ -96,17 +104,40 @@ multi-agent-book-writer/
 ### Write a book from a seed prompt
 
 ```bash
-python main.py --seed seeds/example_seed.md
-python main.py --prompt "A noir thriller set on Mars. Detective Rya Cole ... "
-python main.py --seed my_story.md --chapters 7 --model llama3 --out my_book.md
+uv run main.py --seed seeds/example_seed.md
+uv run main.py --prompt "A noir thriller set on Mars. Detective Rya Cole ... "
+uv run main.py --seed my_story.md --chapters 7 --model llama3 --out my_book.md
 ```
 
 Run the bundled example seed with no preparation:
 
 ```bash
-python main.py            # uses seeds/example_seed.md
-python main.py --demo 2   # same, but only the first 2 chapters
+uv run main.py            # uses seeds/example_seed.md
+uv run main.py --demo 2   # same, but only the first 2 chapters
 ```
+
+### Command-line reference
+
+| Option | Meaning |
+|---|---|
+| `--seed FILE` | Read the seed prompt from a `.md`/`.txt` file. |
+| `--prompt TEXT` | Use inline text as the seed prompt. |
+| `--demo` | Use the bundled example seed (`seeds/example_seed.md`). Cannot be combined with `--seed`/`--prompt`. |
+| `-c N`, `--chapters N` | Chapter count. Beats the seed's outline, the LLM's suggestion and the config. The legacy positional form `main.py N` does the same. |
+| `--config FILE` | Config file to use (default `config.yaml`). |
+| `--model NAME` | Override `llm.model` for this run. |
+| `--out FILE` | Override the output filename (written under `output.directory`). |
+| `--no-resume` | Ignore saved interim files and start over from the seed. See [Resume](#resume). |
+| `-h`, `--help` | Show the built-in help. |
+
+With no seed option the bundled example is used — unless an interrupted run is
+waiting in `output/interim/`, in which case its saved seed is reused.
+
+There is no `--resume` flag: resuming is automatic whenever
+`output/interim/bible.json` exists. Rerun the same command after a crash or
+Ctrl-C and the run continues from the last saved chapter. Add `--no-resume`
+to discard that state and start fresh. A different `--seed`/`--prompt`, or a
+different `-c`, than the saved run is refused unless you add `--no-resume`.
 
 ### The seed prompt format
 
@@ -138,8 +169,9 @@ Point of view, pacing, atmosphere.
 - Chapter 2: Title - what happens
 ```
 
-If the seed has no outline, the planner generates one from the story bible
-(config `book.num_chapters` or `-c N` controls the count). If the seed's
+If the seed has no outline, the planner generates one from the story bible.
+The chapter count comes from `-c N`, otherwise the LLM reads the seed and
+suggests one (honoring any length the seed states, e.g. "5 to 10 chapters"). If the seed's
 outline has fewer chapters than you request, the planner expands it; if it has
 more, the first N are used (with a notice).
 
@@ -147,7 +179,13 @@ more, the first N are used (with a notice).
 
 1. `--chapters N` / positional `N` if given
 2. the number of chapters in the seed's own outline
-3. `book.num_chapters` from config.yaml (default 5)
+3. the LLM's suggestion after reading the seed (`book.auto_chapters: true`,
+   clamped to `book.min_chapters`–`book.max_chapters`)
+4. `book.num_chapters` from config.yaml (default 5) — also the fallback if
+   `auto_chapters` is off or the suggestion call fails
+
+When resuming, the saved outline is reused so chapter numbers keep matching
+the drafts on disk.
 
 ## Resume
 
@@ -162,8 +200,33 @@ text files; the next run loads them and skips already-completed work.
   edited artifact is on disk
 
 The resume is automatic when `output/interim/bible.json` exists. Use
-`--no-resume` to force a clean restart (clears the interim directory and
-rebuilds everything from the seed).
+`--no-resume` to force a clean restart: the previous run (interim files,
+chapters and the assembled book) is **moved** to
+`output/archive/<timestamp>/`, never deleted, and everything is rebuilt from
+the seed. Delete old archives yourself when you no longer need them.
+
+Safety rules for resuming:
+
+- The interim files belong to one seed. With no `--seed`/`--prompt`/`--demo`
+  argument, the seed saved with them is reused. Passing a *different* seed
+  (or a different `-c` count) is an error — it would reuse the old book's
+  chapters — unless you add `--no-resume`.
+- A chapter whose draft survived but whose story state did not (crash, corrupt
+  snapshot) has its state rebuilt from the draft; it is never redrafted.
+- Files are written atomically, so a crash mid-write cannot leave a truncated
+  snapshot.
+- If any chapter cannot be finished the run ends with a non-zero exit code
+  and lists the missing chapters; rerun to resume.
+
+### Server outages mid-run
+
+If the LLM server drops mid-run (timeout, connection refused, or HTTP 503
+"Loading model" while it reloads), the pipeline does not skip the remaining
+chapters: it waits up to `llm.endpoint_wait` seconds (default 300) for the
+server to come back and retries. If the server never returns, the phase
+aborts with a clear message and a non-zero exit code instead of silently
+producing an empty book. Rerun the same command when the server is up —
+resume picks up from the last saved chapter.
 
 ## How It Works
 
@@ -193,8 +256,8 @@ rebuilds everything from the seed).
 ### Interim output
 
 Every artifact is written to `output/interim/` the moment it is produced, so
-you can follow a run as it happens (the directory is cleared at the start of
-each run):
+you can follow a run as it happens (the previous run is archived to
+`output/archive/` at the start of a fresh run):
 
 ```
 output/interim/
@@ -204,16 +267,35 @@ output/interim/
 ├── draft_chapter_NN.md   # each chapter draft, right after writing
 ├── summaries.md          # rolling chapter summaries (rewritten per chapter)
 ├── story_state.md        # rolling chronology: meetings, deaths, relationships
+├── search_chapter_NN.md  # web fact-check claims, results, verdicts (if enabled)
 ├── review_chapter_NN.md  # reviewer verdicts + issues per chapter
+├── diff_chapter_NN.md    # what the editor changed: draft -> final, with its decisions
 ├── edited_chapter_NN.md  # each edited chapter
 ├── lint_report.md        # final deterministic lint across the book
+├── run_stats.md/.json    # LLM calls, tokens, time per agent and phase
 ├── bible.json            # structured bible (resume)
 ├── outline.json          # structured plan (resume)
 ├── summaries.json        # rolling summaries (resume)
 └── chronology.json       # rolling story state (resume)
 ```
 
-Disable with `output.interim: false` in config.yaml.
+Disable with `output.interim: false` in config.yaml (resume reads these
+files, so runs can't resume with it off).
+
+### Durable per-chapter files
+
+Every chapter is also saved on its own the moment it exists, in a directory
+that is never deleted (a fresh start archives it) and is written even with
+`output.interim: false`:
+
+```
+output/chapters/
+└── chapter_NN.md         # draft as soon as it's written; replaced by the
+                          # edited version when polishing finishes
+```
+
+If the app crashes, every finished chapter is still here. A forced clean
+restart moves them to `output/archive/` rather than deleting them.
 
 ### Agent Communication
 
@@ -222,20 +304,165 @@ All agents share a central `context` dict: `seed`, `title`, `bible`,
 
 ## Configuration
 
-`config.yaml` is actually loaded and applied:
+`config.yaml` is loaded and applied; every option, with its default, is
+documented in [`config.example.yaml`](config.example.yaml). Every key is
+optional. Keys:
 
-- **book**: `num_chapters` (fallback), `words_per_chapter` (target length), `word_count_tolerance` (enforced minimum as a fraction of the target — short chapters are lint findings and get sent back for substantive expansion, never padding), `extra_length_rounds` (additional revision rounds granted for length only, while each round still adds ≥15%), `revision_rounds` (review/revise passes per chapter; 0 disables revision)
-- **llm**: `base_url`, `api_key` (`""`, plain value, or `env:VAR`; `LLM_API_KEY` env var is the fallback), `model`, `timeout` (per request), `retries` (with backoff)
-- **agents**: per-agent `temperature` and `enabled` (disable `researcher`/`reviewer`/`editor` to speed things up)
-- **output**: `directory`, `filename`, `overwrite` (`false` appends `-1`, `-2`, ... instead of clobbering), `interim` (progress artifacts under `<directory>/interim/`)
+- **book**: `auto_chapters`/`min_chapters`/`max_chapters` (LLM-suggested chapter count and its clamp), `num_chapters` (fallback), `words_per_chapter` (target length), `word_count_tolerance` (enforced minimum as a fraction of the target — short chapters are lint findings and get sent back for substantive expansion, never padding), `extra_length_rounds` (additional revision rounds granted for length only, while each round still adds ≥15%), `revision_rounds` (review/revise passes per chapter; 0 disables revision), `summary_window` (how many recent chapter summaries the writer/reviewer see in full; older ones are cut to a sentence), `review_as_you_go` (see [Review as you go](#review-as-you-go)), `review_checks` and `repetition_lint` (see [Review quality](#review-quality)), `name_lint_ignore` (words the name-typo lint must never flag)
+- **llm**: `base_url`, `api_key` (`""`, plain value, or `env:VAR`; `LLM_API_KEY` env var is the fallback), `model`, `timeout` (per request), `retries` (with backoff), `max_tokens` (optional per-request cap; replies cut off by a length limit are continued automatically), `endpoint_wait` (seconds to wait for a downed/reloading server before aborting a phase), `reasoning_effort` (`""`, `low`, `medium`, `xhigh`; sent as `chat_template_kwargs.reasoning_effort` for Qwen3.8-style thinking models — the template default is `xhigh`), `enable_thinking` (`true`/`false`; sent as `chat_template_kwargs.enable_thinking` when set; reportedly unsupported on Qwen3.8), `stream`, `json_mode` and `context_window` (see [Observability](#observability))
+- **agents**: per-agent `model` (default `llm.model`; each must exist on the same server and is checked at startup) and `temperature` for `architect`, `planner`, `researcher`, `writer`, `extractor` (per-chapter JSON continuity extraction), `reviewer`, `editor` — only sent when set; otherwise the server/model default applies — and `enabled` for `researcher`/`reviewer`/`editor` (disable them to speed things up)
+- **web_search**: `enabled`, `searxng_url`, `auto_start`, `docker_image`, `queries_per_chapter`, `results_per_query`, `snippet_chars`, `categories`, `timeout`, `double_check`, `allow_terms` (see [Web fact-checking](#web-fact-checking-optional))
+- **output**: `directory`, `filename`, `overwrite` (`false` appends `-1`, `-2`, ... instead of clobbering), `interim` (progress artifacts under `<directory>/interim/`), `log` (copy console output to `<directory>/logs/run-<time>.log`)
 
-CLI overrides: `--model`, `--out`, `--config`.
+Misspelled or unknown options are not silently ignored: at startup each one is reported with a suggestion, e.g. `[CONFIG] unknown key 'book.revision_round' is ignored (did you mean 'revision_rounds'?)`.
+
+Command-line options (`--model`, `--out`, `--config`, ...) are listed in the
+[command-line reference](#command-line-reference).
+
+## Review as you go
+
+By default the pipeline writes **all** chapters, then reviews and polishes them
+all. A continuity slip in chapter 3 is therefore built on by chapters 4 to 10
+before review sees it, and the review of chapter 3 fixes only chapter 3.
+
+Set `book.review_as_you_go: true` to work one chapter at a time instead:
+
+1. write chapter N
+2. lint, review, revise and polish it
+3. re-extract its summary and story facts from the **final** text
+4. only then write chapter N+1 (its prompt uses the edited chapter's facts,
+   summary and ending)
+
+Later chapters build on corrected earlier ones, so a drift is caught right
+after it happens. The cost is one extra LLM call per chapter and no complete
+draft until the end. It needs the editor enabled (otherwise it is ignored with
+a note), and resumes like any run: rerun the same command. The partial book is
+rewritten after every chapter, so it is always on disk. The two modes use the
+same files, so you can resume a run in either mode.
+
+## Review quality
+
+Each chapter goes through the lint, the reviewer and the editor. Beyond the
+continuity checks (deaths, who has met, timeline) there are:
+
+- **Reviewer checks** (`book.review_checks`, default all three):
+  `continuity`; `outline` (does the chapter deliver the beats its outline entry
+  and lore brief require? only entirely missing beats count); `constraints`
+  (your seed's rules a word-counter can't check: POV, tense, content and style).
+  Findings feed the same bounded revise loop; for an outline gap the reviser
+  adds the missing beat as a short passage.
+- **Repetition lint** (`book.repetition_lint`): models reuse imagery and
+  phrasing across chapters ("a shiver ran down her spine as..."). A phrase of six
+  or more words already used twice in earlier chapters is reported and the
+  reviser rewords it; `lint_report.md` also lists phrases repeated across the
+  whole book. Character names and function words don't count.
+- **Edit diffs**: `output/interim/diff_chapter_NN.md` shows, per chapter, the
+  sentence-level diff from draft to final, the lint findings it started with and
+  every decision the editor took (revision accepted or rejected and why, polish
+  accepted or rejected), so you can audit what was changed and catch over-editing.
+- **Character names**: a nickname resolves to the bible character, either one
+  declared in the seed (`**Elizabeth (Liz)**`, `aka Liz`, `known as Liz`) or a
+  common short form (Liz/Beth for Elizabeth, Bob for Robert, Stu for Stuart...),
+  so a death or meeting is tracked for one person however the prose names them.
+  A nickname that fits two characters is left alone.
+
+## Observability
+
+- **Run statistics**: at the end of every run (also a failed or interrupted
+  one) a table of LLM calls, prompt and output tokens, minutes and output
+  tokens/s per agent, plus time per phase, is printed and saved to
+  `output/interim/run_stats.md` and `run_stats.json`. If the server doesn't
+  report token usage the report says so rather than inventing numbers.
+- **Log file**: everything printed, including tracebacks, is also written to
+  `output/logs/run-<time>.log` (`output.log: false` turns it off).
+- **Streaming** (`llm.stream: true`): replies are streamed, a progress line
+  (tokens so far, tokens/s) is printed every ~20 s, and `llm.timeout` becomes
+  the time allowed *without any data*, so a stalled server is noticed in
+  seconds. Off by default.
+- **Context-window guard** (`llm.context_window: <tokens>`): a warning, once per
+  agent, when a prompt reaches 90% of the window (characters per token is
+  calibrated from the usage the server reports). A context-overflow error from
+  the server also gets a hint pointing at `book.summary_window`.
+- **JSON mode** (`llm.json_mode: true`): the calls that return a JSON object
+  (architect, extractor, reviewer, chapter-count suggestion, verdict check) ask
+  the server to enforce it. Array replies and prose are never constrained. If
+  the server rejects it, the run carries on without it.
+
+## Prompts
+
+Every agent has a system prompt (role and rules) in
+[`shared/prompts.py`](shared/prompts.py): architect, planner, researcher,
+writer, extractor, reviewer, reviser and polisher. Agents that need the story
+bible get it in the *system* message rather than the user message. The bible
+is identical for every call, so servers with prompt caching (llama.cpp, vLLM)
+reuse it instead of re-reading it for each chapter. Each chapter's prompt also
+carries the last ~180 words of the previous chapter so voice and transitions
+carry over. To change how a stage behaves (voice, POV, tone rules), edit its
+prompt there.
+
+The writer also guards against unusable replies: an empty, far-too-short, or
+refusal-style response is retried once, and if it fails again the writing
+phase stops (the reply is never saved as a chapter); rerun to resume.
+
+## Web fact-checking (optional)
+
+The researcher can check **real-world** details (places, professions,
+procedures, history) against the web. It is off by default and uses a
+[SearXNG](https://github.com/searxng/searxng) metasearch instance, so there is
+no API key and no third-party account.
+
+```yaml
+web_search:
+  enabled: true
+  searxng_url: "http://localhost:8888"
+  auto_start: ask        # ask | yes | no
+```
+
+**Setup.** Nothing to install if you have Docker. With `enabled: true`, if
+SearXNG isn't reachable at a local URL the app offers to download and start
+it before the run:
+
+```
+[SEARCH] SearXNG is not available: could not reach SearXNG at http://localhost:8888/search (...)
+Download the 'searxng/searxng' Docker image and start SearXNG on 127.0.0.1:8888? [y/N]
+```
+
+It runs a container named `book-writer-searxng`, bound to `127.0.0.1` only,
+with a generated settings file (JSON output on, limiter off, random secret key)
+in `~/.config/multi-agent-book-writer/searxng/`. An existing stopped
+container is restarted instead. `auto_start: yes` skips the question; `no`
+never touches Docker. Without a terminal (cron, CI) it never prompts. To stop
+it later: `docker stop book-writer-searxng` (`docker rm` to remove it). If
+you'd rather run your own SearXNG, point `searxng_url` at it and enable
+`json` under `search.formats` in its `settings.yml`.
+
+**What gets sent.** For each chapter the model proposes a few concrete
+real-world *claims* (how a profession, procedure or place really works), each
+with a short generic query. A query is dropped, and logged, if it mentions a
+character name, an invented place or other proper noun from your world,
+outline or premise (for example "Willow Rooms"), or if it essentially repeats a
+query already run for an earlier chapter. Real places you do want searched go
+in `web_search.allow_terms` (this repo's `config.yaml` allows Hampshire,
+Surrey, England, UK, English and British). Everything searched, and every
+verdict, is saved to `output/interim/search_chapter_NN.md` so you can audit it.
+Queries still leave your machine through SearXNG's upstream search engines.
+
+**How claims are verified.** After searching, the model judges each claim from
+its search results alone: *supported*, *contradicted* or *unclear*. A verdict
+only counts if it cites one of that claim's own results **and** its quote
+really appears in that result's text (checked in code, not by the model);
+otherwise it is downgraded to *unclear*. Only supported and contradicted facts
+reach the lore brief, as quoted data (the model is told to ignore any
+instructions inside it), with the correct fact for anything contradicted. Your
+invented world always stands; only real-world errors are corrected. If search
+or verification fails the brief is written without web facts; the run never
+stops for a search problem. Resumed runs skip chapters that already have a
+brief, and skip the setup offer when every brief exists.
 
 ## Development
 
 ```bash
-pip install pytest
-python -m pytest tests/ -q
+uv run pytest
 ```
 
 The tests cover the pure parsing helpers (JSON extraction, LLM output cleanup,
@@ -246,8 +473,8 @@ seed-outline extraction) — no model required.
 ### Connection error to the LLM server
 The pipeline preflights the endpoint at startup and exits with the available
 models listed if the configured model is missing. Make sure the server is
-running and `llm.base_url` in config.yaml is correct (no trailing
-`/v1` — it is appended automatically).
+running and `llm.base_url` in config.yaml is correct (a trailing `/v1` is
+fine; it is not doubled).
 
 ### Slow generation
 - Use `--chapters 2` for a quick test before a full run
@@ -258,16 +485,13 @@ running and `llm.base_url` in config.yaml is correct (no trailing
 - Try a smaller model
 - Reduce chapter count
 
-## Extensions & Improvements
+## Roadmap
 
-- [ ] Parallelize per-chapter research/writing
-- [ ] Word-count enforcement / regeneration passes
-- [ ] Web search integration for research-grounded nonfiction
-- [ ] PDF/EPUB export
-- [ ] Streamlit UI for monitoring and editing seeds
-- [ ] Character-voice conditioning per POV chapter
+Planned work and known limitations are in [ROADMAP.md](ROADMAP.md).
 
 ## Requirements
+
+Dependencies are declared in `pyproject.toml` (Python 3.11+):
 
 - `requests`: HTTP client for the OpenAI-compatible chat API
 - `PyYAML`: config loading

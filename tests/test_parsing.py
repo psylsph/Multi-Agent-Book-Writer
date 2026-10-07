@@ -262,7 +262,9 @@ def test_extract_seed_characters_bold_bullets():
 - **Amy** - owns the cabins.
 """
     chars = extract_seed_characters(seed)
-    assert [c["name"] for c in chars] == ["Stuart", "Lisa (the third)", "Amy"]
+    # a bracketed qualifier is part of the description, not of the name
+    assert [c["name"] for c in chars] == ["Stuart", "Lisa", "Amy"]
+    assert chars[1]["description"].endswith("(the third)")
     assert chars[0]["role"] == "protagonist"
     assert chars[0]["description"].startswith("protagonist.")
     assert chars[1]["role"] == ""

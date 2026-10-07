@@ -50,4 +50,9 @@ logs/
 # Temporary files
 seed.md
 Modelfile
+uk.lock
+.coverage
 
+# Test coverage artifacts
+.coverage
+htmlcov/

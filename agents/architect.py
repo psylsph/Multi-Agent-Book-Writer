@@ -4,10 +4,12 @@ Converts a raw seed prompt (premise, characters, world, outline, ...) into a
 structured story bible that every later agent uses for consistency.
 """
 
-from shared.context import context, update_context
+from shared import prompts
+from shared.context import update_context
 from shared.llm_utils import (extract_json, extract_seed_characters,
+                              same_character,
                               extract_seed_extras)
-from shared.llm_client import generate
+from shared.llm_client import EndpointUnavailable, generate_with_wait
 from shared.output import (format_bible_markdown, save_interim,
                            save_interim_json)
 
@@ -48,9 +50,12 @@ def _normalize(bible, seed_text):
                 "name": str(c["name"]).strip(),
                 "role": str(c.get("role", "")).strip(),
                 "description": str(c.get("description", "")).strip(),
+                "aliases": [str(a).strip() for a in (c.get("aliases") or [])
+                            if isinstance(a, str) and str(a).strip()],
             })
         elif isinstance(c, str) and c.strip():
-            characters.append({"name": c.strip(), "role": "", "description": ""})
+            characters.append({"name": c.strip(), "role": "", "description": "",
+                               "aliases": []})
 
     title = str(bible.get("title") or "").strip() or _fallback_title(seed_text)
     constraints = [str(c) for c in (bible.get("constraints") or []) if str(c).strip()]
@@ -84,7 +89,7 @@ Return ONLY valid JSON (no markdown fences, no commentary) with exactly these ke
   "genre": "e.g. fantasy mystery, techno-thriller",
   "tone": "narrative voice and style guidance",
   "premise": "2-3 sentence summary of the story",
-  "characters": [{{"name": "...", "role": "protagonist/antagonist/supporting", "description": "appearance, personality, motivation"}}],
+  "characters": [{{"name": "...", "role": "protagonist/antagonist/supporting", "description": "appearance, personality, motivation", "aliases": ["nicknames or short forms used for this person, if any"]}}],
   "world": "setting, rules of the world, important background",
   "constraints": ["facts that must stay consistent: names, dates, magic/tech rules, tone"],
   "notes": "any other author instructions from the seed: explicitness level, banned words, style rules"
@@ -98,10 +103,13 @@ Creative seed:
 """
     bible = None
     try:
-        raw = generate(prompt, agent="architect")
+        raw = generate_with_wait(prompt, system=prompts.ARCHITECT,
+                                 agent="architect", json_mode=True)
         bible = _normalize(extract_json(raw, expect="object"), seed_text)
         print(f"[ARCHITECT] Story bible ready: '{bible['title']}' "
               f"({len(bible['characters'])} characters)")
+    except EndpointUnavailable:
+        raise  # a minimal fallback bible would silently degrade the book
     except Exception as e:
         print(f"[ARCHITECT] LLM bible extraction failed ({e}). "
               "Falling back to raw seed as bible.")
@@ -122,7 +130,9 @@ Creative seed:
     if seed_chars:
         seed_names = {c["name"].lower() for c in seed_chars}
         extras = [c for c in bible.get("characters", [])
-                  if c["name"].lower() not in seed_names]
+                  if c["name"].lower() not in seed_names
+                  and not any(same_character(c["name"], s["name"])
+                              for s in seed_chars)]
         bible["characters"] = seed_chars + extras
         print(f"[ARCHITECT] {len(seed_chars)} characters taken verbatim "
               f"from the seed" + (f", {len(extras)} from the LLM" if extras else ""))
