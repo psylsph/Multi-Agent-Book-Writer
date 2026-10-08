@@ -758,3 +758,37 @@ def test_the_tee_survives_a_closed_log_file(tmp_path, capsys):
     finally:
         runlog.stop_log()
     assert "still prints" in capsys.readouterr().out
+
+
+def test_a_state_write_failure_stops_the_run_with_advice(tmp_path,
+                                                        monkeypatch, capsys):
+    """Carrying on would spend hours on work a crash could not resume."""
+    from shared.resume import StateWriteError
+    _config(tmp_path)
+
+    def broken(*a, **k):
+        raise StateWriteError("could not save the run's plan (disk full)")
+
+    monkeypatch.setattr(pipeline, "run_seed_review", broken)
+    assert pipeline.run_pipeline("SEED") == 1
+    out = capsys.readouterr().out
+    assert "Aborted: could not save the run's plan" in out
+    assert "rerun the same command to resume" in out
+
+
+def test_a_stage_never_swallows_a_state_write_failure(tmp_path, monkeypatch):
+    """The researcher absorbs a failed brief; it must not absorb a failed
+    save."""
+    from shared.resume import StateWriteError
+    _config(tmp_path)
+    update_context("chapters", CHAPTERS[:1])
+    update_context("bible", BIBLE)
+    monkeypatch.setattr(researcher, "generate_with_wait",
+                        lambda *a, **k: "a brief")
+
+    def broken(key, value):
+        raise StateWriteError("disk full")
+
+    monkeypatch.setattr(researcher, "save_state", broken)
+    with pytest.raises(StateWriteError):
+        researcher.run_researcher()

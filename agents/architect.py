@@ -9,9 +9,9 @@ from shared.context import update_context
 from shared.llm_utils import (extract_json, extract_seed_characters,
                               same_character,
                               extract_seed_extras)
-from shared.llm_client import EndpointUnavailable, generate_with_wait
-from shared.output import (format_bible_markdown, save_interim,
-                           save_interim_json)
+from shared.llm_client import AbortRun, generate_with_wait
+from shared.output import format_bible_markdown, save_interim
+from shared.resume import save_state
 
 
 def _fallback_title(seed_text):
@@ -115,7 +115,7 @@ Creative seed:
         bible = _normalize(extract_json(raw, expect="object"), seed_text)
         print(f"[ARCHITECT] Story bible ready: '{bible['title']}' "
               f"({len(bible['characters'])} characters)")
-    except EndpointUnavailable:
+    except AbortRun:
         raise  # a minimal fallback bible would silently degrade the book
     except Exception as e:
         print(f"[ARCHITECT] LLM bible extraction failed ({e}). "
@@ -152,6 +152,6 @@ Creative seed:
     update_context("bible", bible)
     update_context("title", bible["title"])
     update_context("seed", seed_text)
-    save_interim_json("bible.json", bible)
+    save_state("bible", bible)
     save_interim("story_bible.md", format_bible_markdown(bible))
     return bible

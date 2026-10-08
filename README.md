@@ -42,6 +42,7 @@ multi-agent-book-writer/
 │   └── editor.py           # lint -> review -> revise loop, polish, save
 ├── shared/
 │   ├── context.py          # shared state (in-place reset)
+│   ├── resume.py           # the run's state store (output/state/) + resume
 │   ├── llm_client.py      # single LLM client: config, timeout, retries
 │   ├── llm_utils.py        # JSON extraction / output cleanup helpers
 │   ├── story_state.py      # chronology: merge/render story facts
@@ -57,7 +58,7 @@ multi-agent-book-writer/
 │   └── example_seed.md     # example seed prompt (a fantasy mystery)
 ├── tests/                  # offline tests; fake_llm.py is an in-process fake server
 ├── ROADMAP.md              # what is planned and what is known to be missing
-├── output/                 # generated books + interim progress artifacts
+├── output/                 # generated books, run state, interim progress artifacts
 ├── config.yaml             # your settings (copy of the example; not tracked)
 ├── config.example.yaml     # every option documented, with defaults
 ├── pyproject.toml          # dependencies (managed with uv)
@@ -138,14 +139,14 @@ uv run main.py --demo 2   # same, but only the first 2 chapters
 | `--out FILE` | Override the output filename (written under `output.directory`). |
 | `--plan-only` | Stop after the seed review, story bible and outline. Rerun without it to write the book; it continues from that plan. |
 | `--seed-review MODE` | Override `book.seed_review` for this run: `ask`, `warn` or `off`. See [Seed review](#seed-review). |
-| `--no-resume` | Ignore saved interim files and start over from the seed. See [Resume](#resume). |
+| `--no-resume` | Ignore the saved run and start over from the seed. See [Resume](#resume). |
 | `-h`, `--help` | Show the built-in help. |
 
 With no seed option the bundled example is used — unless an interrupted run is
-waiting in `output/interim/`, in which case its saved seed is reused.
+waiting in `output/state/`, in which case its saved seed is reused.
 
 There is no `--resume` flag: resuming is automatic whenever
-`output/interim/bible.json` exists. Rerun the same command after a crash or
+`output/state/bible.json` exists. Rerun the same command after a crash or
 Ctrl-C and the run continues from the last saved chapter. Add `--no-resume`
 to discard that state and start fresh. A different `--seed`/`--prompt`, or a
 different `-c`, than the saved run is refused unless you add `--no-resume`.
@@ -237,7 +238,7 @@ are divided.
 Your answers become part of the story bible, so every later stage sees them. The
 review, scene list and answers are saved to `output/interim/seed_review.md`;
 copy the answers into your seed if you want them for a fresh run. The chosen
-size is saved in `output/interim/plan.json`, so a resumed run keeps it. The
+size is saved in `output/state/plan.json`, so a resumed run keeps it. The
 planner now also reads the seed itself, not just the bible's summary, and is told
 to give each chapter its own material rather than spreading one scene across
 several.
@@ -287,24 +288,31 @@ publishing it; the pipeline's checks reduce errors but cannot remove them.
 ## Resume
 
 If the app or the LLM crashes mid-run, re-running it picks up where it left
-off rather than starting over. Each agent writes structured JSON snapshots
-(bible.json, outline.json, summaries.json, chronology.json) plus per-chapter
-text files; the next run loads them and skips already-completed work.
+off rather than starting over. Everything a later stage needs is saved to
+`output/state/` the moment it exists (`bible.json`, `plan.json`,
+`outline.json`, `research.json`, `drafts.json`, `summaries.json`,
+`chronology.json`, `final.json`); the next run loads it and skips
+already-completed work.
 
-- Architect: skipped once bible.json exists
-- Planner: skipped once outline.json exists
-- Researcher/Writer/Editor: per-chapter skip when the corresponding draft or
-  edited artifact is on disk
+- Architect: skipped once the bible is saved
+- Planner: skipped once the outline is saved
+- Researcher/Writer/Editor: per-chapter skip when that chapter's brief, draft
+  or edited text is saved
 
-The resume is automatic when `output/interim/bible.json` exists. Use
-`--no-resume` to force a clean restart: the previous run (interim files,
-chapters and the assembled book) is **moved** to
+`output/state/` is always written, whatever `output.interim` says, and a write
+that fails (disk full, permissions) **stops the run** with a message rather
+than carrying on with work a crash could no longer resume from. Runs saved by
+older versions, which kept their state in `output/interim/`, still resume.
+
+The resume is automatic when `output/state/bible.json` exists. Use
+`--no-resume` to force a clean restart: the previous run (state, interim
+files, chapters and the assembled book) is **moved** to
 `output/archive/<timestamp>/`, never deleted, and everything is rebuilt from
 the seed. Delete old archives yourself when you no longer need them.
 
 Safety rules for resuming:
 
-- The interim files belong to one seed. With no `--seed`/`--prompt`/`--demo`
+- A saved run belongs to one seed. With no `--seed`/`--prompt`/`--demo`
   argument, the seed saved with them is reused. Passing a *different* seed
   (or a different `-c` count) is an error — it would reuse the old book's
   chapters — unless you add `--no-resume`.
@@ -369,15 +377,11 @@ output/interim/
 ├── diff_chapter_NN.md    # what the editor changed: draft -> final, with its decisions
 ├── edited_chapter_NN.md  # each edited chapter
 ├── lint_report.md        # final deterministic lint across the book
-├── run_stats.md/.json    # LLM calls, tokens, time per agent and phase
-├── bible.json            # structured bible (resume)
-├── outline.json          # structured plan (resume)
-├── summaries.json        # rolling summaries (resume)
-└── chronology.json       # rolling story state (resume)
+└── run_stats.md/.json    # LLM calls, tokens, time per agent and phase
 ```
 
-Disable with `output.interim: false` in config.yaml (resume reads these
-files, so runs can't resume with it off).
+Disable with `output.interim: false` in config.yaml. Resume does not depend
+on these files: it reads `output/state/` (see [Resume](#resume)).
 
 ### Durable per-chapter files
 

@@ -120,6 +120,8 @@ def test_format_bible_markdown_sections():
 def _populate(out):
     (out / "interim").mkdir(parents=True)
     (out / "interim" / "bible.json").write_text("{}")
+    (out / "state").mkdir()
+    (out / "state" / "drafts.json").write_text("{}")
     (out / "chapters").mkdir()
     (out / "chapters" / "chapter_01.md").write_text("# Chapter 1\n\nText")
     (out / "draft.md").write_text("the old book")
@@ -133,11 +135,12 @@ def test_archive_moves_the_previous_run_instead_of_deleting(tmp_path):
     dest = archive_previous_run()
     assert dest.parent == out / "archive"
     assert (dest / "interim" / "bible.json").exists()
+    assert (dest / "state" / "drafts.json").exists()
     assert (dest / "chapters" / "chapter_01.md").read_text().endswith("Text")
     assert (dest / "draft.md").read_text() == "the old book"
     assert (dest / "story_bible.md").exists()
     # the output dir is clean for the new run
-    for gone in ("interim", "chapters", "draft.md", "story_bible.md"):
+    for gone in ("state", "interim", "chapters", "draft.md", "story_bible.md"):
         assert not (out / gone).exists()
 
 

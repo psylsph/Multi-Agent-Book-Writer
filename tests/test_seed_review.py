@@ -200,7 +200,7 @@ def test_ask_without_a_terminal_only_warns(tmp_path, monkeypatch, capsys):
     assert "at most 0" in calls[0]["prompt"]           # no questions asked for
     text = capsys.readouterr().out
     assert "TOO LONG" in text and "Warning: the requested size does not fit" in text
-    plan = json.loads((tmp_path / "out" / "interim" / "plan.json").read_text())
+    plan = json.loads((tmp_path / "out" / "state" / "plan.json").read_text())
     assert plan["chapters"] == 25
 
 
@@ -251,7 +251,7 @@ def test_stop(tmp_path, monkeypatch):
     _answers(monkeypatch, "x", "s")                     # a bad letter, then stop
     out = seed_review.run_seed_review(SEED)
     assert out["stop"]
-    assert not (tmp_path / "out" / "interim" / "plan.json").exists()
+    assert not (tmp_path / "out" / "state" / "plan.json").exists()
 
 
 def test_a_fitting_request_is_not_questioned(tmp_path, monkeypatch):
@@ -347,7 +347,7 @@ def test_stopping_writes_nothing_to_resume(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "run_architect",
                         lambda *a: pytest.fail("must not run"))
     assert pipeline.run_pipeline(SEED) == 0
-    assert not (tmp_path / "out" / "interim" / "bible.json").exists()
+    assert not (tmp_path / "out" / "state" / "bible.json").exists()
 
 
 @pytest.fixture(autouse=True)

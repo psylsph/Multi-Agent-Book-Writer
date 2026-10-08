@@ -112,7 +112,7 @@ the Planner generates an outline if you don't provide one.
 
 There is no `--resume` flag; it is automatic. If a run crashes, the server
 drops, or you hit Ctrl-C, just rerun the **same command** and it continues
-from the last saved chapter (progress lives in `output/interim/`).
+from the last saved chapter (the run's state lives in `output/state/`).
 
 - Start over instead: add `--no-resume` (the old run is moved to `output/archive/`, not deleted).
 - Rerun with no `--seed`/`--prompt`: the saved seed is reused.

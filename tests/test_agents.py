@@ -62,7 +62,7 @@ def test_writer_drafts_every_chapter_and_records_state(tmp_path, stub_writer):
     assert sorted(context["chronology"]) == [1, 2, 3]
     assert context["chronology"][1]["summary"] == "Things happened."
     assert (out / "chapters" / "chapter_03.md").exists()
-    assert (out / "interim" / "chronology.json").exists()
+    assert (out / "state" / "chronology.json").exists()
 
 
 def test_writer_recap_only_includes_earlier_chapters(tmp_path, stub_writer):

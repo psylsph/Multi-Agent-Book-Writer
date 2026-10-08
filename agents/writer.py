@@ -12,10 +12,11 @@ import re
 from shared import extraction_checks, prompts
 from shared.context import context, update_context
 from shared.llm_utils import clean_llm_text, extract_json
-from shared.llm_client import (EndpointUnavailable, generate_prose,
+from shared.llm_client import (AbortRun, EndpointUnavailable, generate_prose,
                                generate_with_wait, get_config)
-from shared.output import chapter_filename, save_chapter, save_interim, \
-    save_interim_json
+from shared.output import chapter_filename, render_chapter, save_chapter, \
+    save_interim
+from shared.resume import save_state
 from shared.story_state import (merge_states, minimal_state, normalize_state,
                                 render_story_facts, render_story_so_far)
 
@@ -129,7 +130,7 @@ Chapter {number}: {title}
             state["summary"] = summary
             state = _check_state(number, draft, state, canon, aliases)
             return summary, state
-        except EndpointUnavailable:
+        except AbortRun:
             raise  # the draft is saved; abort and let a rerun resume
         except Exception as e:
             last_error = e
@@ -155,7 +156,7 @@ def _ask_names(prompt, key, candidates):
         raw = generate_with_wait(prompt, system=prompts.VERIFIER,
                                  agent="extractor", json_mode=True)
         answer = extract_json(raw, expect="object").get(key)
-    except EndpointUnavailable:
+    except AbortRun:
         raise
     except Exception:
         return None
@@ -346,10 +347,11 @@ def _save_state(chapters, drafts, summaries, chronology):
     update_context("summaries", summaries)
     update_context("chronology", chronology)
     update_context("drafts", drafts)
+    save_state("drafts", drafts)
+    save_state("summaries", summaries)
+    save_state("chronology", chronology)
     save_interim("summaries.md", _summaries_markdown(chapters, summaries))
     save_interim("story_state.md", _states_markdown(chronology))
-    save_interim_json("summaries.json", summaries)
-    save_interim_json("chronology.json", chronology)
 
 
 def _final_body(number):
@@ -413,7 +415,7 @@ def run_writer(only=None):
                                     context.get("summaries", {}),
                                     context.get("chronology", {}))
 
-    def save_state():
+    def persist():
         _save_state(chapters, drafts, summaries, chronology)
 
     for chapter in chapters:
@@ -430,7 +432,7 @@ def run_writer(only=None):
                       "state; rebuilding the state from the draft.")
                 summaries[n], chronology[n] = _summarize_and_extract(
                     n, ch_title, drafts[n])
-                save_state()
+                persist()
             continue
 
         print(f"[WRITER] Writing chapter {n}/{len(chapters)}: {ch_title}")
@@ -481,6 +483,8 @@ Requirements:
                   f"phase at chapter {n}. Rerun the same command to resume "
                   "from the last saved chapter.")
             raise
+        except AbortRun:
+            raise
         except Exception as e:
             # Later chapters build on this one's summary and facts; drafting
             # on past a gap would break continuity. Stop and let a rerun
@@ -497,16 +501,15 @@ Requirements:
 
         word_count = len(draft.split())
         drafts[n] = draft
-        save_interim(
-            chapter_filename("draft", n),
-            f"## Chapter {n}: {ch_title}\n\n{draft}",
-        )
+        save_state("drafts", drafts)  # before extraction: never lose a draft
+        save_interim(chapter_filename("draft", n),
+                     render_chapter(n, ch_title, draft))
         save_chapter(n, ch_title, draft)
         print(f"[WRITER] Draft completed for chapter {n} ({word_count} words).")
 
         summaries[n], chronology[n] = _summarize_and_extract(n, ch_title,
                                                              draft)
-        save_state()
+        persist()
 
     update_context("drafts", drafts)
     update_context("summaries", summaries)

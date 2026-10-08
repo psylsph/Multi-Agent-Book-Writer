@@ -12,7 +12,7 @@ from pathlib import Path
 from shared import prompts
 from shared.context import context, update_context
 from shared.llm_utils import clean_llm_text
-from shared.llm_client import EndpointUnavailable, agent_enabled, \
+from shared.llm_client import AbortRun, agent_enabled, \
     generate_prose, get_config
 from shared.output import (atomic_write_text, chapter_filename,
                            format_bible_markdown, render_chapter, save_chapter,
@@ -21,6 +21,7 @@ from shared.consistency import (check_chronology, format_findings,
                                 lint_book, lint_chapter,
                                 repeated_phrase_finding, word_count,
                                 word_count_finding)
+from shared.resume import save_state
 from shared.story_state import merge_states
 from agents.reviewer import UNREVIEWED, run_reviewer
 
@@ -262,7 +263,7 @@ def run_editor(only=None):
             try:
                 revised = _revise(n, title, draft, lint, issues,
                                   system=revise_system)
-            except EndpointUnavailable:
+            except AbortRun:
                 raise  # abort rather than silently shipping unedited chapters
             except Exception as e:
                 print(f"[EDITOR] Revision failed for chapter {n}: {e}")
@@ -331,7 +332,7 @@ Return ONLY the edited chapter, starting with its original heading."""
             # ("## Chapter Three", no heading at all) only the body is kept
             body = strip_heading(clean_llm_text(
                 generate_prose(prompt, system=polish_system, agent="editor")))
-        except EndpointUnavailable:
+        except AbortRun:
             raise  # abort rather than silently shipping the unpolished draft
         except Exception as e:
             print(f"[EDITOR] Error editing chapter {n}: {e}; keeping draft.")
@@ -363,6 +364,8 @@ Return ONLY the edited chapter, starting with its original heading."""
         update_context("unreviewed", unreviewed)
         final[n] = body
         update_context("final", final)
+        save_state("final", final)
+        save_state("unreviewed", sorted(unreviewed))
         save_interim(chapter_filename("diff", n),
                      diff_report(n, title, original, body, notes))
         save_interim(chapter_filename("edited", n),

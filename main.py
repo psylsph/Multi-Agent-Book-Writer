@@ -26,8 +26,8 @@ from shared.llm_client import EndpointUnavailable, agent_enabled, \
     get_config, load_config, preflight
 from shared.output import (archive_previous_run, interim_dir,
                            interim_enabled, save_interim, save_interim_json)
-from shared.resume import has_resume, load_plan, load_state, \
-    summarize_for_log
+from shared.resume import StateWriteError, has_resume, load_plan, \
+    load_state, summarize_for_log
 
 EXAMPLE_SEED = Path(__file__).resolve().parent / "seeds" / "example_seed.md"
 
@@ -76,22 +76,22 @@ def check_resume(args, state, num_chapters):
     Interim files belong to ONE seed. Resuming them under a different seed
     would skip every saved chapter and ship the old book under the new
     bible, so that is an error unless --no-resume is given. With no seed
-    argument at all, the seed saved with the interim files is reused.
+    argument at all, the seed saved with the run is reused.
     """
     if not state["bible"]:
-        sys.exit("Error: the interim state in output/interim/ is unreadable "
+        sys.exit("Error: the saved run in output/state/ is unreadable "
                  "(bible.json missing or corrupt). Rerun with --no-resume to "
                  "start over.")
     stored = state["bible"].get("seed", "")
     explicit = bool(args.demo or args.seed or args.prompt)
     if not explicit and stored:
-        print("[RESUME] Reusing the seed saved with the interim files.")
+        print("[RESUME] Reusing the seed saved with the run.")
         seed_text = stored
     else:
         seed_text = resolve_seed_text(args)
         if stored and _norm_seed(seed_text) != _norm_seed(stored):
             sys.exit(
-                "Error: output/interim/ holds a run for a DIFFERENT seed. "
+                "Error: the saved run is for a DIFFERENT seed. "
                 "Resuming would reuse its chapters for this seed. Rerun with "
                 "--no-resume to start fresh, or pass the original seed to "
                 "resume.")
@@ -145,6 +145,8 @@ def _hydrate_resume(state):
         update_context("chronology", state["chronology"])
     if state["final"]:
         update_context("final", dict(state["final"]))
+    if state.get("unreviewed"):
+        update_context("unreviewed", set(state["unreviewed"]))
 
 
 @contextlib.contextmanager
@@ -222,7 +224,7 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None,
     Args:
         seed_text: the creative seed (premise, characters, world, outline...)
         num_chapters: explicit chapter count override (None = seed/config)
-        resuming: continue from the interim files instead of starting over
+        resuming: continue from the saved state instead of starting over
         state: already-loaded resume state (loaded here when omitted)
         plan_only: stop after the outline (seed review, bible, plan)
     """
@@ -237,8 +239,7 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None,
         state = state or load_state()
         reset_context()
         _hydrate_resume(state)
-        print(f"[RESUME] Loaded {summarize_for_log(state)} from "
-              "output/interim/.")
+        print(f"[RESUME] Loaded {summarize_for_log(state)}.")
         if interim_enabled():
             print(f"[PIPELINE] Interim artifacts: {interim_dir()}/")
     else:
@@ -363,6 +364,11 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None,
         print("[PIPELINE] Start/restart the server, then rerun the same "
               "command -- resume will pick up from the last saved chapter.")
         return 1
+    except StateWriteError as e:
+        print(f"\n[PIPELINE] Aborted: {e}")
+        print("[PIPELINE] Free some disk space or fix the permissions, then "
+              "rerun the same command to resume from the last saved step.")
+        return 1
     except Exception as e:
         print(f"\n[PIPELINE] Error: {e}")
         raise
@@ -401,7 +407,7 @@ def main():
                              "choose the size (ask), only report (warn), or "
                              "skip the check (off)")
     parser.add_argument("--no-resume", action="store_true",
-                        help="ignore any prior interim artifacts and restart "
+                        help="ignore any saved run and restart "
                              "from the seed prompt")
     args = parser.parse_args()
 

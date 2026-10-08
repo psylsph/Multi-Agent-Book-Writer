@@ -56,8 +56,11 @@ def test_a_fresh_run_writes_the_whole_book(tmp_path, monkeypatch, capsys):
     assert marker(1) in book and marker(2) in book
     assert sorted(p.name for p in (out(tmp_path) / "chapters").iterdir()) == \
         ["chapter_01.md", "chapter_02.md"]
+    state = {p.name for p in (out(tmp_path) / "state").iterdir()}
+    assert {"bible.json", "outline.json", "research.json", "drafts.json",
+            "summaries.json", "chronology.json", "final.json"} <= state
     interim = {p.name for p in (out(tmp_path) / "interim").iterdir()}
-    assert {"bible.json", "outline.json", "lore_chapter_01.md",
+    assert {"lore_chapter_01.md",
             "draft_chapter_02.md", "edited_chapter_02.md",
             "review_chapter_01.md", "diff_chapter_01.md",
             "run_stats.md", "run_stats.json"} <= interim
@@ -109,7 +112,7 @@ def test_the_seed_review_sizes_a_book_without_an_outline(tmp_path,
     assert run(monkeypatch, cfg, seed="# Story\n\nA premise only.") == 0
     assert fake.kinds["seed_review"] == 1 and "suggest" not in fake.kinds
     assert fake.kinds["writer"] == 2             # its recommendation: 2
-    plan = json.loads((out(tmp_path) / "interim" / "plan.json").read_text())
+    plan = json.loads((out(tmp_path) / "state" / "plan.json").read_text())
     assert plan["chapters"] == 2 and plan["words_per_chapter"] == 100
 
 

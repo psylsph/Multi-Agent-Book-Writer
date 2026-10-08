@@ -47,7 +47,7 @@ shared/
   consistency.py   deterministic lint: banned words, quotas, names, word count, repetition
   extraction_checks.py  grounding/death checks on extracted story state (pure)
   web_search.py    SearXNG client, query filtering, verdict validation, Docker helper
-  resume.py        rebuild state from output/interim/ after a crash
+  resume.py        the run's state store (output/state/): save_state, load_state
   output.py        interim artifacts, durable chapters/, archiving, atomic writes
   config_schema.py known config keys; warns about typos
   runlog.py, epub.py
@@ -69,10 +69,11 @@ written, edited and has its story state re-extracted before the next is drafted.
   Use `generate_prose` for long text (it stitches continuations on
   `finish_reason=length`), `json_mode=True` only for replies that are a JSON
   *object*.
-- **`EndpointUnavailable` must propagate.** Agents catch broad `Exception` to
-  degrade gracefully, but always re-raise `EndpointUnavailable` first (`except
-  EndpointUnavailable: raise`). Swallowing it would silently ship degraded output
-  while the server is down; letting it escape lets the user rerun and resume.
+- **`AbortRun` must propagate.** Agents catch broad `Exception` to degrade
+  gracefully, but always re-raise `AbortRun` first (`except AbortRun: raise`).
+  Its subclasses are `EndpointUnavailable` (server down) and `StateWriteError`
+  (state can't be saved). Swallowing one would silently ship degraded output or
+  lose resumability; letting it escape lets the user fix the cause and rerun.
 - **Shared context is mutated in place.** Modules do `from shared.context import
   context`; `reset_context()` clears and refills the same dict. Never rebind it.
   Chapter-keyed dicts (`drafts`, `research`, `summaries`, `chronology`) use `int`
@@ -82,12 +83,15 @@ written, edited and has its story state re-extracted before the next is drafted.
   editor has finished). Headings are added only when writing files, via
   `shared/output.py` (`chapter_heading`, `render_chapter`, `strip_heading`).
   Never parse model output for a heading: strip it and render ours.
-- **Resume reads the interim files.** `output/interim/` is both the human-readable
-  progress view and the resume store (`bible.json`, `outline.json`,
-  `summaries.json`, `chronology.json`, `plan.json`, `lore_/draft_/edited_chapter_NN.md`).
-  If you change a filename, heading format or JSON shape, update `shared/resume.py`
-  and `tests/test_resume.py` together. Every stage must stay idempotent: skip work
-  whose result is already in context.
+- **Resume reads `output/state/`, not `interim/`.** Anything a later stage or a
+  rerun needs goes through `shared/resume.py:save_state(key, value)` (one JSON
+  file per key in `STATE_KEYS`; chapter-keyed dicts get their int keys back on
+  load). It is always written and raises `StateWriteError` on failure.
+  `interim/` (`save_interim`) is the optional, best-effort human-readable view:
+  never read it back. A new piece of state means a new `STATE_KEYS` entry, a
+  `load_state()` field, `main._hydrate_resume`, and a test in
+  `tests/test_resume.py`. Every stage must stay idempotent: skip work whose
+  result is already in context.
 - **Never lose generated text.** Writes use `atomic_write_text`; a fresh run
   archives the previous one (`archive_previous_run`) instead of deleting it;
   revisions/polishes that shrink a chapter or add findings are rejected and the
@@ -146,4 +150,4 @@ written, edited and has its story state re-extracted before the next is drafted.
   (`llm.api_key` supports `env:VAR`).
 - Don't add a dependency for something the standard library does.
 - Don't make a stage fail hard on a bad model reply: fall back, log it, continue
-  (except on `EndpointUnavailable`).
+  (except on `AbortRun`).

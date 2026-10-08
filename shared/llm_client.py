@@ -22,7 +22,13 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 
 _config = None
 
-class EndpointUnavailable(RuntimeError):
+class AbortRun(RuntimeError):
+    """An error that must stop the run rather than be absorbed by a stage's
+    fallback: the run can't usefully continue, but a rerun can resume.
+    Stages that catch Exception to degrade gracefully re-raise this first."""
+
+
+class EndpointUnavailable(AbortRun):
     """The LLM endpoint is down, unreachable, or not ready (connection
     refused, timeout, or an HTTP 5xx such as 'Loading model'). Retrying
     once the server is back should succeed."""

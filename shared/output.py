@@ -57,7 +57,7 @@ def archive_previous_run():
     """Move the previous run out of the way WITHOUT deleting it.
 
     A fresh start used to wipe interim/ (and leave stale chapters/ behind).
-    Now interim/, chapters/ and the assembled book are moved into
+    Now state/, interim/, chapters/ and the assembled book are moved into
     <output dir>/archive/<timestamp>/, so hours of generated text are never
     lost to a restart. Returns the archive path, or None when there was
     nothing to archive. Never raises on a missing file; a failed move is
@@ -65,7 +65,8 @@ def archive_previous_run():
     """
     cfg = get_config()["output"]
     out = Path(cfg["directory"])
-    candidates = [out / "interim", out / "chapters", out / "story_bible.md"]
+    candidates = [out / "state", out / "interim", out / "chapters",
+                  out / "story_bible.md"]
     if cfg.get("overwrite", True):          # otherwise the -N naming applies
         candidates.append(out / cfg.get("filename", "draft.md"))
     present = [p for p in candidates if p.exists()

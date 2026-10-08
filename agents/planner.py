@@ -13,9 +13,10 @@ import re
 from shared import prompts
 from shared.context import context, update_context
 from shared.llm_utils import extract_json, strip_code_fences
-from shared.llm_client import EndpointUnavailable, generate_with_wait, \
+from shared.llm_client import AbortRun, generate_with_wait, \
     get_config
-from shared.output import save_interim, save_interim_json
+from shared.output import save_interim
+from shared.resume import save_state
 
 # "## Outline", "# Story Outline:", "Outline:" section headers
 _SECTION_HEADER_RE = re.compile(
@@ -289,7 +290,7 @@ Creative seed:
                                agent="planner", json_mode=True),
             expect="object")
         count = int(data["chapters"])
-    except EndpointUnavailable:
+    except AbortRun:
         raise  # the server is down; don't plan around a guess
     except Exception as e:
         print(f"[PLANNER] Could not get a chapter-count suggestion ({e}); "
@@ -362,7 +363,7 @@ def run_planner(num_chapters=None):
                   f"expanding to {target} with the LLM.")
             try:
                 chapters = _plan_with_llm(bible, target, fixed_prefix=seed_outline)
-            except EndpointUnavailable:
+            except AbortRun:
                 raise
             except Exception as e:
                 print(f"[PLANNER] Expansion failed ({e}); "
@@ -373,14 +374,14 @@ def run_planner(num_chapters=None):
               f"generating {target} chapters from the story bible.")
         try:
             chapters = _plan_with_llm(bible, target)
-        except EndpointUnavailable:
+        except AbortRun:
             raise
         except Exception as e:
             print(f"[PLANNER] Error: {e}")
             return []
 
     update_context("chapters", chapters)
-    save_interim_json("outline.json", chapters)
+    save_state("outline", chapters)
     save_interim("outline.md", _outline_markdown(chapters))
     print(f"[PLANNER] Outline ready ({len(chapters)} chapters):")
     for ch in chapters:

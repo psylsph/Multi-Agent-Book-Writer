@@ -15,7 +15,7 @@ into bounded revision rounds.
 
 from shared import prompts
 from shared.context import context
-from shared.llm_client import (EndpointUnavailable, generate_with_wait,
+from shared.llm_client import (AbortRun, generate_with_wait,
                                get_config)
 from shared.llm_utils import extract_json
 from shared.output import chapter_filename, save_interim
@@ -172,7 +172,7 @@ def run_reviewer(number, title, draft):
     silently mark chapters reviewed while it is down)."""
     try:
         return review_chapter(number, title, draft)
-    except EndpointUnavailable:
+    except AbortRun:
         raise
     except Exception as e:
         print(f"[REVIEWER] Could not read the review of chapter {number} "

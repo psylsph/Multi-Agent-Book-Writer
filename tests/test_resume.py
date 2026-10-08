@@ -3,7 +3,9 @@
 
 from shared.llm_client import load_config
 from shared.output import save_interim, save_interim_json
-from shared.resume import has_resume, load_state
+from shared.resume import (StateWriteError, has_resume, load_plan,
+                           load_state, save_state)
+import pytest
 
 
 def _use_config(tmp_path):
@@ -24,7 +26,8 @@ def test_load_state_empty_when_no_interim(tmp_path):
     assert not has_resume()
 
 
-def test_save_and_load_round_trip(tmp_path):
+def test_a_run_saved_by_an_older_version_still_loads(tmp_path):
+    """Older versions kept the run's state in interim/."""
     _use_config(tmp_path)
     bible = {"title": "Test", "characters": [{"name": "Aria"}], "seed": "x"}
     chapters = [{"number": 1, "title": "One", "summary": "begin"},
@@ -73,3 +76,58 @@ def test_interim_writes_are_atomic_and_leave_no_temp_files(tmp_path):
     files = sorted(p.name for p in (out / "interim").iterdir())
     assert files == ["draft_chapter_01.md"]
     assert (out / "interim" / "draft_chapter_01.md").read_text() == "two"
+
+
+def test_state_round_trip(tmp_path):
+    out = _use_config(tmp_path)
+    save_state("bible", {"title": "T", "seed": "S"})
+    save_state("plan", {"chapters": 2, "words_per_chapter": 900})
+    save_state("outline", [{"number": 1, "title": "One", "summary": ""}])
+    save_state("drafts", {1: "draft one", 2: "draft two"})
+    save_state("research", {1: "brief"})
+    save_state("summaries", {1: "sum"})
+    save_state("chronology", {1: {"present": [], "events": []}})
+    save_state("final", {1: "edited one"})
+    save_state("unreviewed", [1])
+    assert (out / "state" / "drafts.json").exists()
+    assert has_resume()
+    state = load_state()
+    assert state["bible"]["title"] == "T"
+    assert state["chapters"][0]["title"] == "One"
+    assert state["drafts"] == {1: "draft one", 2: "draft two"}   # int keys
+    assert state["research"] == {1: "brief"}
+    assert state["summaries"] == {1: "sum"}
+    assert state["final"] == {1: "edited one"}
+    assert state["unreviewed"] == {1}
+    assert load_plan()["words_per_chapter"] == 900
+
+
+def test_state_is_saved_even_with_interim_output_off(tmp_path):
+    directory = tmp_path / "out"
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"output:\n  directory: \"{directory}\"\n  interim: false\n")
+    load_config(cfg)
+    save_state("bible", {"title": "T"})
+    save_interim("story_bible.md", "human copy")
+    assert has_resume()
+    assert not (directory / "interim").exists()
+
+
+def test_a_failed_state_write_raises(tmp_path):
+    out = _use_config(tmp_path)
+    out.mkdir(parents=True)
+    (out / "state").write_text("a file where the directory should be")
+    with pytest.raises(StateWriteError, match="drafts"):
+        save_state("drafts", {1: "x"})
+
+
+def test_unknown_state_keys_are_a_bug():
+    with pytest.raises(ValueError):
+        save_state("draftz", {})
+
+
+def test_the_new_layout_wins_over_an_old_one(tmp_path):
+    _use_config(tmp_path)
+    save_interim_json("bible.json", {"title": "OLD"})
+    save_state("bible", {"title": "NEW"})
+    assert load_state()["bible"]["title"] == "NEW"

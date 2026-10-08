@@ -14,8 +14,9 @@ from shared import web_search
 from shared.context import context, update_context
 from shared import prompts
 from shared.llm_utils import extract_json
-from shared.llm_client import EndpointUnavailable, generate_with_wait
+from shared.llm_client import AbortRun, EndpointUnavailable, generate_with_wait
 from shared.output import chapter_filename, save_interim
+from shared.resume import save_state
 
 
 def _log_dropped(query, term):
@@ -67,7 +68,7 @@ def confirms(verdict):
                                  agent="verifier", json_mode=True)
         data = extract_json(raw, expect="object")
         agrees = data.get("answer", data.get("agrees"))
-    except EndpointUnavailable:
+    except AbortRun:
         raise
     except Exception:
         return None
@@ -98,7 +99,7 @@ def _gather_web_facts(n, chapter, bible, forbidden=(), seen=None):
     every claim from its results alone. A verdict only counts if its quote
     really appears in the cited result. Returns the verified facts for the
     lore brief ("" when there are none). `seen` collects queries across
-    chapters so repeats are skipped. Never raises except EndpointUnavailable:
+    chapters so repeats are skipped. Never raises except AbortRun:
     search problems just mean a brief without web facts.
     """
     seen = seen if seen is not None else []
@@ -122,7 +123,7 @@ Return ONLY a JSON array: [{{"claim": "a checkable statement", "query": "a short
         raw = generate_with_wait(prompt, system=prompts.FACT_CHECKER,
                                  agent="researcher")
         claims = _claims_from(raw, forbidden, limit, seen)
-    except EndpointUnavailable:
+    except AbortRun:
         raise
     except Exception as e:
         print(f"[RESEARCHER] Chapter {n}: could not plan web claims ({e}).")
@@ -161,7 +162,7 @@ Use "unclear" unless a result directly addresses the claim. Return ONLY a JSON a
                 claims, extract_json(raw, expect="array"))
             if ws["double_check"]:
                 verdicts = _double_check(n, verdicts)
-        except EndpointUnavailable:
+        except AbortRun:
             raise
         except Exception as e:
             print(f"[RESEARCHER] Chapter {n}: could not verify claims ({e}); "
@@ -245,9 +246,12 @@ Notes only - do not write prose."""
                   f"research phase at chapter {n}. Rerun the same command "
                   "to resume (completed briefs are saved).")
             raise
+        except AbortRun:
+            raise
         except Exception as e:
             print(f"[RESEARCHER] Error briefing chapter {n}: {e}")
-            research_data[n] = ""
+            research_data[n] = ""          # empty: a rerun tries again
+        save_state("research", research_data)
 
     update_context("research", research_data)
     done = sum(1 for v in research_data.values() if v)

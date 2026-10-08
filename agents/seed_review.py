@@ -17,10 +17,11 @@ without a terminal), warn (report only, never prompts), off.
 import sys
 
 from shared import prompts
-from shared.llm_client import EndpointUnavailable, generate_with_wait, \
+from shared.llm_client import AbortRun, generate_with_wait, \
     get_config
 from shared.llm_utils import extract_json
-from shared.output import save_interim, save_interim_json
+from shared.output import save_interim
+from shared.resume import save_state
 from shared.web_search import quote_in_text
 
 VERDICTS = ("too_long", "about_right", "too_short")
@@ -411,7 +412,7 @@ def run_seed_review(seed_text, num_chapters=None, outline_chapters=0):
     Returns {"chapters": int or None, "words_per_chapter": int,
     "clarifications": [...], "stop": bool}. chapters None means "let the
     planner decide as before" (review off or failed with nothing requested).
-    Never raises except EndpointUnavailable.
+    Never raises except AbortRun.
     """
     book = get_config()["book"]
     wpc = int(book["words_per_chapter"])
@@ -437,7 +438,7 @@ def run_seed_review(seed_text, num_chapters=None, outline_chapters=0):
 
     try:
         assessment, requested, recommended, notes, flag = checked()
-    except EndpointUnavailable:
+    except AbortRun:
         raise
     except Exception as e:
         print(f"[SEED REVIEW] Could not review the seed ({e}); planning as "
@@ -457,7 +458,7 @@ def run_seed_review(seed_text, num_chapters=None, outline_chapters=0):
                 assessment, requested, recommended, notes, flag = checked(
                     clarifications)
                 shown = False
-            except EndpointUnavailable:
+            except AbortRun:
                 raise
             except Exception as e:
                 print(f"[SEED REVIEW] Re-check failed ({e}); using the first "
@@ -485,7 +486,7 @@ def run_seed_review(seed_text, num_chapters=None, outline_chapters=0):
         result["chapters"] = chosen["chapters"]
         result["words_per_chapter"] = chosen["words_per_chapter"]
         print(f"[SEED REVIEW] Book size: {_size_line(chosen)}.")
-    save_interim_json("plan.json", {
+    save_state("plan", {
         "chapters": result["chapters"],
         "words_per_chapter": result["words_per_chapter"],
         "clarifications": result["clarifications"]})

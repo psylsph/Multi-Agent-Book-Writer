@@ -240,5 +240,6 @@ output:
   filename: "draft.md"    # the assembled book, under directory
   overwrite: true         # false appends -1, -2, ... instead of overwriting
   log: true               # copy all console output to <directory>/logs/run-<time>.log
-  interim: true           # progress artifacts in <directory>/interim/. Also
-                          # what resume reads: with false, runs can't resume.
+  interim: true           # human-readable progress in <directory>/interim/.
+                          # Resume reads <directory>/state/, which is always
+                          # written, so runs resume with this off too.
