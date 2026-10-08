@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 from shared.llm_client import get_config
+from shared.output import strip_heading
 
 
 def resume_dir():
@@ -41,34 +42,18 @@ def _read_json(path):
         return None
 
 
-def _strip_heading(text):
-    """Remove a leading markdown heading ('## Chapter N: Title' or
-    '# Lore Brief - Chapter N: Title') and the blank line after it. Text
-    without a leading heading (e.g. hand-edited) is returned untouched."""
-    if not text.lstrip().startswith("#"):
-        return text
-    parts = text.split("\n\n", 1)
-    return parts[1] if len(parts) == 2 else ""
-
-
-_strip_lore_heading = _strip_heading
-
-
 def load_state():
     """Read all persisted state from output/interim/.
 
     Returns a dict with keys:
       bible, chapters, summaries, chronology  (None if absent)
       research, drafts                          ({chapter_number: text})
-      final                                     ([(chapter_number, text), ...]
-                                                in chapter order)
-      completed_chapters                        (set of ints where edited)
+      final                                     ({chapter_number: edited body})
     Missing keys are None or empty - callers decide whether to skip that
     step or rebuild it from scratch.
     """
     out = {"bible": None, "chapters": None, "summaries": None,
-           "chronology": None, "research": {}, "drafts": {}, "final": [],
-           "completed_chapters": set()}
+           "chronology": None, "research": {}, "drafts": {}, "final": {}}
     d = resume_dir()
     if not d.exists():
         return out
@@ -92,24 +77,21 @@ def load_state():
             n = int(path.stem.split("_")[-1])
         except ValueError:
             continue
-        out["research"][n] = _strip_lore_heading(path.read_text(encoding="utf-8"))
+        out["research"][n] = strip_heading(path.read_text(encoding="utf-8"))
 
     for path in sorted(d.glob("draft_chapter_*.md")):
         try:
             n = int(path.stem.split("_")[-1])
         except ValueError:
             continue
-        out["drafts"][n] = _strip_heading(path.read_text(encoding="utf-8"))
+        out["drafts"][n] = strip_heading(path.read_text(encoding="utf-8"))
 
-    finals = []
     for path in sorted(d.glob("edited_chapter_*.md")):
         try:
             n = int(path.stem.split("_")[-1])
         except ValueError:
             continue
-        finals.append((n, path.read_text(encoding="utf-8")))
-    out["final"] = sorted(finals, key=lambda nv: nv[0])
-    out["completed_chapters"] = {n for n, _ in finals}
+        out["final"][n] = strip_heading(path.read_text(encoding="utf-8"))
     return out
 
 

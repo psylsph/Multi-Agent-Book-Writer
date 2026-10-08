@@ -354,11 +354,7 @@ def _save_state(chapters, drafts, summaries, chronology):
 
 def _final_body(number):
     """Body of chapter `number` as edited, or None before it is edited."""
-    prefix = f"## Chapter {number}:"
-    for entry in context.get("final") or []:
-        if entry.startswith(prefix):
-            return entry.split("\n\n", 1)[1] if "\n\n" in entry else ""
-    return None
+    return (context.get("final") or {}).get(number)
 
 
 def refresh_state(number):

@@ -136,6 +136,28 @@ def save_interim_json(filename, obj):
     return save_interim(filename, text)
 
 
+def chapter_heading(number, title):
+    """The one heading format for a chapter in the book and interim files."""
+    return f"## Chapter {number}: {title}"
+
+
+def render_chapter(number, title, body):
+    """A chapter body with its heading, as written to the book."""
+    return f"{chapter_heading(number, title)}\n\n{body}"
+
+
+def strip_heading(text):
+    """`text` without a leading markdown heading line and the blank lines
+    after it. Only the heading LINE goes: a model that puts the first
+    paragraph straight under the heading keeps that paragraph. Text that
+    doesn't start with a heading (e.g. hand-edited) is returned untouched."""
+    stripped = text.lstrip()
+    if not stripped.startswith("#"):
+        return text
+    parts = stripped.split("\n", 1)
+    return parts[1].lstrip("\n") if len(parts) == 2 else ""
+
+
 def chapter_filename(prefix, number):
     """Stable per-chapter filename, e.g. draft_chapter_03.md."""
     return f"{prefix}_chapter_{number:02d}.md"

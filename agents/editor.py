@@ -15,7 +15,8 @@ from shared.llm_utils import clean_llm_text
 from shared.llm_client import EndpointUnavailable, agent_enabled, \
     generate_prose, get_config
 from shared.output import (atomic_write_text, chapter_filename,
-                           format_bible_markdown, save_chapter, save_interim)
+                           format_bible_markdown, render_chapter, save_chapter,
+                           save_interim, strip_heading)
 from shared.consistency import (check_chronology, format_findings,
                                 lint_book, lint_chapter,
                                 repeated_phrase_finding, word_count,
@@ -33,15 +34,9 @@ MIN_POLISH_RATIO = 0.85
 def _earlier_bodies(n, drafts, final):
     """Bodies of the chapters before `n`: the edited text where it exists,
     otherwise the draft."""
-    edited = {}
-    for entry in final:
-        m = re.match(r"## Chapter (\d+):", entry)
-        if m:
-            edited[int(m.group(1))] = (entry.split("\n\n", 1)[1]
-                                       if "\n\n" in entry else "")
-    return [edited.get(k) or drafts[k]
-            for k in sorted(set(drafts) | set(edited)) if k < n
-            and (edited.get(k) or drafts.get(k))]
+    return [final.get(k) or drafts[k]
+            for k in sorted(set(drafts) | set(final)) if k < n
+            and (final.get(k) or drafts.get(k))]
 
 
 def _sentences(text):
@@ -164,8 +159,7 @@ def run_editor(only=None):
     revise_system = f"{prompts.REVISER}\n\nSTORY BIBLE REFERENCE\n{reference}"
     polish_system = f"{prompts.POLISHER}\n\nSTORY BIBLE REFERENCE\n{reference}"
 
-    final = list(context.get("final", []))
-    completed = set(context.get("completed_chapters", set()))
+    final = dict(context.get("final") or {})
     for chapter in chapters:
         n, title = chapter["number"], chapter["title"]
         if only is not None and n != only:
@@ -174,7 +168,7 @@ def run_editor(only=None):
         if not draft:
             print(f"[EDITOR] No draft for chapter {n}; skipping.")
             continue
-        if n in completed:
+        if n in final:
             print(f"[EDITOR] Chapter {n}: already edited; skipping.")
             continue
 
@@ -278,7 +272,7 @@ def run_editor(only=None):
                   f"revision (see lint_report.md)")
 
         # ---- final polish pass
-        draft_with_heading = f"## Chapter {n}: {title}\n\n{draft}"
+        draft_with_heading = render_chapter(n, title, draft)
         print(f"[EDITOR] Polishing chapter {n}...")
         prompt = f"""You are a professional fiction editor. Edit the chapter below.
 
@@ -294,57 +288,65 @@ CHAPTER (begins with its markdown heading - keep that heading unchanged):
 
 Return ONLY the edited chapter, starting with its original heading."""
         try:
-            edited = clean_llm_text(
-                generate_prose(prompt, system=polish_system, agent="editor"))
-            if not edited.startswith("##"):
-                edited = f"## Chapter {n}: {title}\n\n{edited}"
+            # the heading is ours to write: whatever the model did with it
+            # ("## Chapter Three", no heading at all) only the body is kept
+            body = strip_heading(clean_llm_text(
+                generate_prose(prompt, system=polish_system, agent="editor")))
         except EndpointUnavailable:
             raise  # abort rather than silently shipping the unpolished draft
         except Exception as e:
             print(f"[EDITOR] Error editing chapter {n}: {e}; keeping draft.")
-            edited = draft_with_heading
+            body = draft
 
         # deterministic guard: keep whichever version has fewer lint findings
-        body = edited.split("\n\n", 1)[1] if "\n\n" in edited else edited
-        if word_count(body) < MIN_POLISH_RATIO * word_count(draft):
+        if body is draft:
+            notes.append("polish failed; pre-polish version kept")
+        elif word_count(body) < MIN_POLISH_RATIO * word_count(draft):
             print(f"[EDITOR] Polish shortened chapter {n} "
                   f"({word_count(draft)} -> {word_count(body)} words); "
                   "keeping pre-polish version.")
             notes.append("polish rejected (shortened the chapter)")
-            edited = draft_with_heading
+            body = draft
         elif len(full_lint(body)) > len(full_lint(draft)):
             print(f"[EDITOR] Polish introduced lint findings for chapter {n}; "
                   "keeping pre-polish version.")
             notes.append("polish rejected (introduced lint findings)")
-            edited = draft_with_heading
+            body = draft
         else:
             notes.append("polish accepted")
 
-        final.append(edited)
-        final_body = (edited.split("\n\n", 1)[1] if "\n\n" in edited
-                      else edited)
+        final[n] = body
+        update_context("final", final)
         save_interim(chapter_filename("diff", n),
-                     diff_report(n, title, original, final_body, notes))
-        save_interim(chapter_filename("edited", n), edited)
+                     diff_report(n, title, original, body, notes))
+        save_interim(chapter_filename("edited", n),
+                     render_chapter(n, title, body))
         # replace the draft in the durable per-chapter file with the
         # polished version
-        save_chapter(n, title, edited.split("\n\n", 1)[1]
-                     if edited.startswith("## ") else edited)
-        completed.add(n)
-        update_context("completed_chapters", completed)
+        save_chapter(n, title, body)
         print(f"[EDITOR] Chapter {n} complete.")
 
     update_context("final", final)
     return finalize_book(final)
 
 
-def finalize_book(final_chapters):
-    """Re-emit the lint report and the assembled book. Idempotent."""
-    _write_lint_report(final_chapters)
-    return save_book(final_chapters)
+def _in_book_order(bodies):
+    """[(number, title, body)] for the chapters in `bodies` ({number: body}),
+    in outline order."""
+    titles = {c["number"]: c["title"] for c in context.get("chapters") or []}
+    order = [n for n in titles if n in bodies]
+    order += sorted(n for n in bodies if n not in titles)
+    return [(n, titles.get(n, ""), bodies[n]) for n in order if bodies[n]]
 
 
-def _write_lint_report(final_chapters):
+def finalize_book(bodies):
+    """Re-emit the lint report and the assembled book. Idempotent.
+    bodies: {chapter number: body text}."""
+    _write_lint_report(bodies)
+    return save_book(bodies)
+
+
+def _write_lint_report(bodies):
     """Final deterministic lint report across the whole book."""
     cfg = get_config()
     bible = context.get("bible") or {}
@@ -352,33 +354,23 @@ def _write_lint_report(final_chapters):
     target_words = int(cfg["book"]["words_per_chapter"])
     tolerance = float(cfg["book"]["word_count_tolerance"])
     min_words = int(target_words * tolerance)
-    full_text = "\n\n".join(final_chapters)
-    bodies = {}
-    for entry in final_chapters:
-        m = re.match(r"## Chapter (\d+):", entry)
-        if m:
-            bodies[int(m.group(1))] = (entry.split("\n\n", 1)[1]
-                                       if "\n\n" in entry else "")
+    chapters = _in_book_order(bodies)
+    full_text = "\n\n".join(render_chapter(n, t, b) for n, t, b in chapters)
     findings = lint_book(
         full_text, bible, constraints,
         cfg["book"]["name_lint_ignore"] or [],
-        bodies if cfg["book"]["repetition_lint"] else None)
+        {n: b for n, _, b in chapters} if cfg["book"]["repetition_lint"]
+        else None)
 
     # per-chapter word counts (wc -w semantics)
-    chapters = context.get("chapters", [])
     counts = []
-    for ch in chapters:
-        match = next((c for c in final_chapters
-                      if c.startswith(f"## Chapter {ch['number']}:")), None)
-        if match:
-            body = match.split("\n\n", 1)[1] if "\n\n" in match else match
-            wc = word_count(body)
-            flag = " **SHORT**" if wc < min_words else ""
-            counts.append(f"- Chapter {ch['number']}: {wc} words{flag} "
-                          f"(min {min_words})")
+    for n, _, body in chapters:
+        wc = word_count(body)
+        flag = " **SHORT**" if wc < min_words else ""
+        counts.append(f"- Chapter {n}: {wc} words{flag} (min {min_words})")
 
     lines = ["# Lint Report (final book)", "",
-             f"Chapters: {len(final_chapters)}  "
+             f"Chapters: {len(chapters)}  "
              f"Words: {word_count(full_text)}  "
              f"Target/chapter: {target_words} (min {min_words})", "",
              "## Chapter word counts", ""]
@@ -392,8 +384,9 @@ def _write_lint_report(final_chapters):
     save_interim("lint_report.md", "\n".join(lines) + "\n")
 
 
-def save_book(final_chapters):
-    """Assemble and write the book + story bible to the output directory."""
+def save_book(bodies):
+    """Assemble and write the book + story bible to the output directory.
+    bodies: {chapter number: body text}; headings come from the outline."""
     cfg = get_config()
     out_dir = Path(cfg["output"]["directory"])
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -408,7 +401,8 @@ def save_book(final_chapters):
         out_path = out_dir / f"{stem}-{i}{suffix}"
 
     title = context.get("title", "Untitled")
-    book = f"# {title}\n\n" + "\n\n".join(final_chapters) + "\n"
+    book = (f"# {title}\n\n" + "\n\n".join(
+        render_chapter(n, t, b) for n, t, b in _in_book_order(bodies)) + "\n")
     try:
         atomic_write_text(out_path, book)
         update_context("output_path", str(out_path))

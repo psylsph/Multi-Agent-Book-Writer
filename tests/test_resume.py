@@ -20,7 +20,7 @@ def test_load_state_empty_when_no_interim(tmp_path):
     assert state["bible"] is None
     assert state["chapters"] is None
     assert state["drafts"] == {}
-    assert state["final"] == []
+    assert state["final"] == {}
     assert not has_resume()
 
 
@@ -47,17 +47,23 @@ def test_save_and_load_round_trip(tmp_path):
     assert [c["number"] for c in state["chapters"]] == [1, 2]
     assert state["drafts"][1] == "first draft"            # heading stripped
     assert state["research"][1] == "brief"                 # heading stripped
-    assert [n for n, _ in state["final"]] == [1, 2]         # ordered
-    assert state["completed_chapters"] == {1, 2}
+    assert state["final"] == {1: "final one", 2: "final form"}
     assert state["summaries"] == summaries
     assert state["chronology"] == chronology
 
 
 def test_strip_heading_leaves_headingless_text_alone():
-    from shared.resume import _strip_heading
-    assert _strip_heading("First paragraph.\n\nSecond.") == \
+    from shared.output import strip_heading
+    assert strip_heading("First paragraph.\n\nSecond.") == \
         "First paragraph.\n\nSecond."
-    assert _strip_heading("## Chapter 1: One\n\nBody.") == "Body."
+    assert strip_heading("## Chapter 1: One\n\nBody.") == "Body."
+
+
+def test_strip_heading_keeps_a_paragraph_right_under_the_heading():
+    from shared.output import strip_heading
+    assert strip_heading("## Chapter 1: One\nFirst.\n\nSecond.") == \
+        "First.\n\nSecond."
+    assert strip_heading("## Chapter 1: One") == ""
 
 
 def test_interim_writes_are_atomic_and_leave_no_temp_files(tmp_path):

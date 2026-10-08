@@ -14,7 +14,7 @@ DEFAULTS = {
     "drafts": {},      # chapter number -> draft text
     "summaries": {},   # chapter number -> rolling plot summary
     "chronology": {},  # chapter number -> structured story state
-    "final": [],       # edited chapters in order
+    "final": {},       # chapter number -> edited body (no heading)
     "output_path": "", # where the final book was actually written
 }
 

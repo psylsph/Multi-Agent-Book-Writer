@@ -258,7 +258,7 @@ def test_reviewer_findings_are_fixed_and_rereviewed(tmp_path, monkeypatch):
             reviewer=lambda *a: next(reviews))
     editor.run_editor()
     assert "REVIEWER NOTES" in revise_prompts[0] and "wrong day" in revise_prompts[0]
-    assert "fixed" in context["final"][0]
+    assert "fixed" in context["final"][1]
 
 
 def test_a_short_chapter_is_expanded_with_the_length_instructions(
@@ -275,7 +275,7 @@ def test_a_short_chapter_is_expanded_with_the_length_instructions(
     editor.run_editor()
     assert "LENGTH - HARD REQUIREMENT" in seen[0]
     assert "the draft is 50 words; the minimum is" in seen[0]
-    assert len(context["final"][0].split()) > 100
+    assert len(context["final"][1].split()) > 100
 
 
 def test_expansion_stops_when_it_stalls(tmp_path, monkeypatch, capsys):
@@ -296,7 +296,7 @@ def test_expansion_stops_when_it_stalls(tmp_path, monkeypatch, capsys):
     editor.run_editor()
     assert "expansion stalled at 170 words" in capsys.readouterr().out
     assert len(revisions) == 2                       # not all 4 allowed rounds
-    assert context["completed_chapters"] == {1}
+    assert set(context["final"]) == {1}
 
 
 def test_a_polish_failure_keeps_the_revised_draft(tmp_path, monkeypatch,
@@ -307,8 +307,7 @@ def test_a_polish_failure_keeps_the_revised_draft(tmp_path, monkeypatch,
     _editor(monkeypatch, tmp_path, {1: _words(120)}, prose)
     editor.run_editor()
     assert "Error editing chapter 1: model fell over" in capsys.readouterr().out
-    assert context["final"][0].startswith("## Chapter 1: Ch1")
-    assert _words(120)[:20] in context["final"][0]
+    assert context["final"][1] == _words(120)
 
 
 def test_a_polish_that_drops_the_heading_gets_it_back(tmp_path, monkeypatch):
@@ -317,7 +316,23 @@ def test_a_polish_that_drops_the_heading_gets_it_back(tmp_path, monkeypatch):
 
     _editor(monkeypatch, tmp_path, {1: _words(120)}, prose)
     editor.run_editor()
-    assert context["final"][0].startswith("## Chapter 1: Ch1\n\n")
+    assert context["final"][1] == _words(120)
+    edited = tmp_path / "out" / "interim" / "edited_chapter_01.md"
+    assert edited.read_text().startswith("## Chapter 1: Ch1\n\n")
+
+
+def test_a_polish_with_a_reworded_heading_keeps_only_its_body(tmp_path,
+                                                              monkeypatch):
+    """A heading in another form ("Chapter One") is replaced by ours, and a
+    first paragraph written straight under it is not lost."""
+    def prose(prompt, **kwargs):
+        return "## Chapter One: The Start\n" + _words(120)
+
+    _editor(monkeypatch, tmp_path, {1: _words(120)}, prose)
+    editor.run_editor()
+    assert context["final"][1] == _words(120)
+    book = (tmp_path / "out" / "draft.md").read_text()
+    assert "## Chapter 1: Ch1\n\n" in book and "Chapter One" not in book
 
 
 @pytest.mark.parametrize("failing", ["revise", "polish"])
@@ -352,7 +367,7 @@ def test_chapters_without_a_draft_or_already_edited_are_skipped(
     _editor(monkeypatch, tmp_path, {1: _words(120)},
             lambda p, **k: pytest.fail("no LLM call expected"))
     update_context("chapters", CHAPTERS)             # chapter 2 has no draft
-    update_context("completed_chapters", {1})
+    update_context("final", {1: "edited"})
     editor.run_editor()
     text = capsys.readouterr().out
     assert "Chapter 1: already edited" in text and "No draft for chapter 2" in text
@@ -364,7 +379,7 @@ def test_overwrite_false_numbers_the_books(tmp_path):
     out = _config(tmp_path, output_extra="  overwrite: false\n")
     update_context("title", "T")
     for expected in ("draft.md", "draft-1.md", "draft-2.md"):
-        editor.save_book(["## Chapter 1: A\n\ntext"])
+        editor.save_book({1: "text"})
         assert (out / expected).exists()
         assert context["output_path"].endswith(expected)
 
@@ -378,7 +393,7 @@ def test_a_book_that_cannot_be_written_is_returned_not_lost(
         raise OSError("disk full")
 
     monkeypatch.setattr(editor, "atomic_write_text", refuse)
-    book = editor.save_book(["## Chapter 1: A\n\ntext"])
+    book = editor.save_book({1: "text"})
     assert book.startswith("# T") and "Error saving book: disk full" in \
         capsys.readouterr().out
 
@@ -395,7 +410,7 @@ def test_a_story_bible_that_cannot_be_written_only_warns(tmp_path,
         real(path, text)
 
     monkeypatch.setattr(editor, "atomic_write_text", only_the_book)
-    editor.save_book(["## Chapter 1: A\n\ntext"])
+    editor.save_book({1: "text"})
     assert "could not save story bible" in capsys.readouterr().out
 
 
@@ -404,9 +419,8 @@ def test_the_lint_report_flags_short_chapters_and_findings(tmp_path):
     update_context("bible", {"title": "T", "characters": [],
                              "constraints": ['Never "ominous".']})
     update_context("chapters", CHAPTERS)
-    editor._write_lint_report([
-        f"## Chapter 1: Ch1\n\n{_words(120)} ominous",
-        f"## Chapter 2: Ch2\n\n{_words(30)}"])
+    editor._write_lint_report({1: f"{_words(120)} ominous",
+                               2: _words(30)})
     report = (out / "interim" / "lint_report.md").read_text()
     assert "- Chapter 1: 121 words (min 80)" in report
     assert "- Chapter 2: 30 words **SHORT** (min 80)" in report
@@ -468,12 +482,10 @@ def test_hydrating_resume_state_fills_the_context(tmp_path):
     state = {"bible": {"title": "T", "seed": "S"}, "chapters": CHAPTERS,
              "research": {1: "brief"}, "drafts": {1: "draft"},
              "summaries": {1: "sum"}, "chronology": {1: {"x": 1}},
-             "final": [(1, "## Chapter 1: A\n\nbody")],
-             "completed_chapters": {1}}
+             "final": {1: "body"}}
     pipeline._hydrate_resume(state)
     assert context["title"] == "T" and context["seed"] == "S"
-    assert context["final"] == ["## Chapter 1: A\n\nbody"]
-    assert context["completed_chapters"] == {1}
+    assert context["final"] == {1: "body"}
     assert context["summaries"] == {1: "sum"}
 
 
@@ -591,16 +603,16 @@ def test_unreadable_snapshots_are_skipped_with_a_warning(tmp_path, capsys):
     (interim / "draft_chapter_02.md").write_text("## Chapter 2: B\n\nbody")
     state = load_state()
     assert state["bible"] is None and "failed to load" in capsys.readouterr().out
-    assert state["research"] == {} and state["final"] == []
+    assert state["research"] == {} and state["final"] == {}
     assert state["drafts"] == {2: "body"}
     assert _read_json(interim / "bible.json") is None
 
 
 def test_summarize_for_log():
-    empty = dict(bible=None, chapters=None, drafts={}, final=[])
+    empty = dict(bible=None, chapters=None, drafts={}, final={})
     assert summarize_for_log(empty) == "nothing"
     full = dict(bible={"title": "T"}, chapters=[1, 2], drafts={1: "a"},
-                final=[(1, "x")])
+                final={1: "x"})
     assert summarize_for_log(full) == \
         "bible 'T', plan 2 chapters, 1 drafted, 1 edited"
 

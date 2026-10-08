@@ -144,10 +144,7 @@ def _hydrate_resume(state):
     if state["chronology"] is not None:
         update_context("chronology", state["chronology"])
     if state["final"]:
-        update_context("final", [text for _, text in state["final"]])
-    if state["completed_chapters"]:
-        update_context("completed_chapters",
-                       set(state["completed_chapters"]))
+        update_context("final", dict(state["final"]))
 
 
 @contextlib.contextmanager
@@ -201,7 +198,7 @@ def run_interleaved():
             print(f"[PIPELINE] Chapter {n} could not be drafted; stopping. "
                   "Rerun the same command to resume from this chapter.")
             return
-        if n in (get_context("completed_chapters") or ()):
+        if n in (get_context("final") or {}):
             continue  # edited (and refreshed) in an earlier run
         run_editor(only=n)
         refresh_state(n)
@@ -211,7 +208,7 @@ def run_interleaved():
 def _incomplete_chapters(context, editor_on):
     """Numbers of planned chapters that never reached their final form
     (edited when the editor is on, drafted otherwise)."""
-    done = (set(context.get("completed_chapters") or ())
+    done = (set(context.get("final") or ())
             if editor_on else set(context.get("drafts") or ()))
     return [c["number"] for c in context.get("chapters") or []
             if c["number"] not in done]
@@ -330,12 +327,7 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None,
                 run_editor()
         else:
             print("\n[PIPELINE] Step 5: Editor disabled; saving drafts.")
-            drafts = get_context("drafts")
-            chapters = get_context("chapters")
-            save_book([
-                f"## Chapter {c['number']}: {c['title']}\n\n{drafts[c['number']]}"
-                for c in chapters if drafts.get(c["number"])
-            ])
+            save_book(get_context("drafts"))
 
         context = get_context()
         elapsed = time.time() - start_time

@@ -77,9 +77,11 @@ written, edited and has its story state re-extracted before the next is drafted.
   context`; `reset_context()` clears and refills the same dict. Never rebind it.
   Chapter-keyed dicts (`drafts`, `research`, `summaries`, `chronology`) use `int`
   keys; JSON round-trips turn them into strings, so `resume.py` converts back.
-- **`final` is a list of `"## Chapter N: Title\n\nbody"` strings.** Several places
-  parse the body back out with `split("\n\n", 1)` or a `## Chapter (\d+):` regex.
-  Keep that exact heading format when producing edited chapters.
+- **Chapter text is stored without headings.** `drafts` and `final` map chapter
+  number -> body (`final` holds the edited chapters; its keys are the chapters the
+  editor has finished). Headings are added only when writing files, via
+  `shared/output.py` (`chapter_heading`, `render_chapter`, `strip_heading`).
+  Never parse model output for a heading: strip it and render ours.
 - **Resume reads the interim files.** `output/interim/` is both the human-readable
   progress view and the resume store (`bible.json`, `outline.json`,
   `summaries.json`, `chronology.json`, `plan.json`, `lore_/draft_/edited_chapter_NN.md`).

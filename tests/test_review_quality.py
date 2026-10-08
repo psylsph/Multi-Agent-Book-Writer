@@ -215,7 +215,7 @@ def test_editor_asks_for_a_reused_phrase_to_be_reworded(tmp_path, monkeypatch):
     assert "already used 2+ times in earlier chapters" in revise
     assert "shiver ran down her spine" in revise
     assert "For repeated_phrase findings, reword" in revise
-    assert PHRASE not in context["final"][-1]
+    assert PHRASE not in context["final"][3]
 
 
 def test_repetition_lint_can_be_switched_off(tmp_path, monkeypatch):
@@ -227,9 +227,9 @@ def test_repetition_lint_can_be_switched_off(tmp_path, monkeypatch):
 def test_earlier_chapters_use_their_edited_text(tmp_path, monkeypatch):
     update = editor._earlier_bodies(
         3, {1: "draft one", 2: "draft two"},
-        ["## Chapter 1: A\n\nedited one"])
+        {1: "edited one"})
     assert update == ["edited one", "draft two"]
-    assert editor._earlier_bodies(1, {1: "x"}, []) == []
+    assert editor._earlier_bodies(1, {1: "x"}, {}) == []
 
 
 def test_editor_saves_a_diff_with_its_decisions(tmp_path, monkeypatch):

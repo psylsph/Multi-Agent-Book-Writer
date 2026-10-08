@@ -63,7 +63,7 @@ def _stub_loop(monkeypatch, drafted=(1, 2, 3)):
 
     def edit(only=None):
         events.append(("edit", only))
-        context.setdefault("completed_chapters", set()).add(only)
+        context["final"][only] = "edited"
 
     monkeypatch.setattr(pipeline, "run_writer", write)
     monkeypatch.setattr(pipeline, "run_editor", edit)
@@ -97,7 +97,7 @@ def test_loop_stops_at_a_chapter_that_cannot_be_drafted(tmp_path, monkeypatch):
 def test_already_edited_chapters_are_not_edited_or_refreshed_again(
         tmp_path, monkeypatch):
     _config(tmp_path)
-    update_context("completed_chapters", {1})
+    update_context("final", {1: "edited"})
     events = _stub_loop(monkeypatch)
     pipeline.run_interleaved()
     assert ("edit", 1) not in events and ("refresh", 1) not in events
@@ -127,8 +127,7 @@ def test_editor_only_edits_the_requested_chapter(tmp_path, monkeypatch):
 
     monkeypatch.setattr(editor, "generate_prose", prose)
     editor.run_editor(only=2)
-    assert context["completed_chapters"] == {2}
-    assert [e.split(":")[0] for e in context["final"]] == ["## Chapter 2"]
+    assert set(context["final"]) == {2}
     assert (tmp_path / "out" / "draft.md").exists()      # partial book on disk
 
 
@@ -145,7 +144,7 @@ def test_refresh_state_uses_the_edited_text(tmp_path, monkeypatch):
     update_context("drafts", {1: "ORIGINAL DRAFT"})
     update_context("summaries", {1: "OLD"})
     update_context("chronology", {1: minimal_state(1, "Ch1", "OLD")})
-    update_context("final", ["## Chapter 1: Ch1\n\nEDITED TEXT"])
+    update_context("final", {1: "EDITED TEXT"})
     writer.refresh_state(1)
     assert "EDITED TEXT" in seen["prompt"] and "ORIGINAL" not in seen["prompt"]
     assert context["summaries"][1] == "NEW"
@@ -160,7 +159,7 @@ def test_refresh_state_keeps_the_old_state_when_extraction_fails(
     update_context("drafts", {1: "draft"})
     update_context("summaries", {1: "GOOD"})
     update_context("chronology", {1: good})
-    update_context("final", ["## Chapter 1: Ch1\n\nEDITED"])
+    update_context("final", {1: "EDITED"})
     writer.refresh_state(1)
     assert context["summaries"][1] == "GOOD"
     assert context["chronology"][1]["location"] == "kept"
@@ -198,7 +197,7 @@ def test_next_chapter_is_written_from_the_edited_chapter(tmp_path, monkeypatch):
     second = writer_prompts[1]
     assert "EDITED=True" in second          # facts re-extracted after editing
     assert "EDITEDMARK" in second           # ending taken from the edited text
-    assert sorted(context["completed_chapters"]) == [1, 2, 3]
+    assert sorted(context["final"]) == [1, 2, 3]
     book = (tmp_path / "out" / "draft.md").read_text()
     assert book.count("EDITEDMARK") == 3
     assert [c for c in range(1, 4) if f"## Chapter {c}:" in book] == [1, 2, 3]

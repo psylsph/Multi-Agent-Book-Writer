@@ -156,7 +156,7 @@ def _run_editor(monkeypatch, revise_reply, polish_reply=None):
 
     monkeypatch.setattr(editor, "generate_prose", prose)
     editor.run_editor()
-    return context["final"][0]
+    return context["final"][1]
 
 
 def _body_of(prompt):
@@ -220,7 +220,7 @@ def _args(**kw):
 
 def _state(seed="SEED", chapters=3, finals=0):
     return {"bible": {"title": "T", "seed": seed},
-            "chapters": CHAPTERS[:chapters], "final": [(1, "x")] * finals}
+            "chapters": CHAPTERS[:chapters], "final": {n: "x" for n in range(1, finals + 1)}}
 
 
 def test_resume_reuses_the_saved_seed_when_none_given():
@@ -248,11 +248,11 @@ def test_resume_refuses_a_different_chapter_count():
 def test_resume_refuses_unreadable_bible():
     with pytest.raises(SystemExit):
         pipeline.check_resume(_args(), {"bible": None, "chapters": None,
-                                        "final": []}, None)
+                                        "final": {}}, None)
 
 
 def test_incomplete_chapters_reports_unfinished_work():
-    ctx = {"chapters": CHAPTERS, "completed_chapters": {1},
+    ctx = {"chapters": CHAPTERS, "final": {1: "edited"},
            "drafts": {1: "a", 2: "b"}}
     assert pipeline._incomplete_chapters(ctx, editor_on=True) == [2, 3]
     assert pipeline._incomplete_chapters(ctx, editor_on=False) == [3]
