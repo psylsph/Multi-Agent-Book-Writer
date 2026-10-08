@@ -22,6 +22,8 @@ from shared.output import atomic_write_text, strip_heading
 # key -> True when the value is a {chapter number: ...} dict (JSON keys are
 # strings, so these are turned back into ints when loaded)
 STATE_KEYS = {
+    "seed": False,         # the master seed the seed review grew, with the
+                           # author's original: {original, current, pending}
     "bible": False,        # story bible (includes the seed)
     "plan": False,         # book size + clarifications from the seed review
     "outline": False,      # [{"number", "title", "summary", "part"}]
@@ -69,8 +71,10 @@ def _legacy():
 
 
 def has_resume():
-    """True when there is a saved run to continue."""
-    return (state_dir() / "bible.json").exists() or _legacy()
+    """True when there is a saved run to continue: a bible, or a seed review
+    that expanded the seed and stopped before the bible was built."""
+    return ((state_dir() / "bible.json").exists()
+            or (state_dir() / "seed.json").exists() or _legacy())
 
 
 def load_plan():
@@ -99,7 +103,7 @@ def _int_keys(value):
 
 
 def _empty():
-    return {"bible": None, "chapters": None, "summaries": None,
+    return {"seed": None, "bible": None, "chapters": None, "summaries": None,
             "chronology": None, "research": {}, "drafts": {}, "final": {},
             "unreviewed": set()}
 
@@ -108,6 +112,8 @@ def load_state():
     """Read the saved run.
 
     Returns a dict with keys:
+      seed                                      ({original, current,
+                                                pending, rounds} or None)
       bible, chapters, summaries, chronology  (None if absent)
       research, drafts, final                   ({chapter_number: text})
       unreviewed                                (set of chapter numbers)
@@ -191,6 +197,9 @@ def _migrate(state):
 def summarize_for_log(state):
     """One-line summary of what was loaded, for the startup banner."""
     bits = []
+    if (state.get("seed") or {}).get("current"):
+        bits.append(f"a seed expanded in {state['seed'].get('rounds', '?')} "
+                    "review round(s)")
     if state["bible"]:
         bits.append(f"bible '{state['bible'].get('title', '?')}'")
     if state["chapters"]:

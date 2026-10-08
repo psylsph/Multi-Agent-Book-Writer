@@ -204,45 +204,136 @@ def test_ask_without_a_terminal_only_warns(tmp_path, monkeypatch, capsys):
     assert plan["chapters"] == 25
 
 
-def test_answers_trigger_a_recheck_and_the_recommendation_can_be_taken(
-        tmp_path, monkeypatch):
+def _expander(monkeypatch, *versions):
+    """Scripted expansions of the seed, in order."""
+    prompts = []
+    queue = list(versions)
+
+    def fake(prompt, **kwargs):
+        prompts.append({"prompt": prompt, **kwargs})
+        return queue.pop(0)
+
+    monkeypatch.setattr(seed_review, "generate_prose", fake)
+    return prompts
+
+
+EXPANDED = SEED + "\n## Subplot\n\nThe hosts are divorcing.\n"
+
+
+def test_answers_expand_the_seed_which_is_reviewed_again(tmp_path,
+                                                         monkeypatch):
+    """critique -> answers -> expansion -> keep -> critique -> done -> size"""
     _config(tmp_path)
     calls = _llm(monkeypatch, _assessment(),
                  _assessment(recommended={"chapters": 14,
                                           "words_per_chapter": 2500},
                              questions=[]))
-    _answers(monkeypatch, "Yes: the hosts are divorcing", "", "r")
+    expansions = _expander(monkeypatch, EXPANDED)
+    _answers(monkeypatch, "a", "Yes: the hosts are divorcing", "", "",
+             "k", "d", "r")
     out = seed_review.run_seed_review(SEED)
     assert (out["chapters"], out["words_per_chapter"]) == (14, 2500)
-    assert out["clarifications"] == [
-        {"question": "Is there a subplot for the hosts?",
-         "answer": "Yes: the hosts are divorcing", "answered": True},
-        {"question": "POV?", "answer": "Alternating Stuart and Kirsty.",
-         "answered": False}]
-    assert len(calls) == 2
-    assert "the hosts are divorcing" in calls[1]["prompt"]
-    assert "at most 0" in calls[1]["prompt"]           # no second round
-    saved = (tmp_path / "out" / "interim" / "seed_review.md").read_text()
-    assert "Clarifications" in saved and "*(assumed)*" in saved
+    assert out["seed"] == EXPANDED
+    assert out["clarifications"] == []              # built into the seed
+    assert "the hosts are divorcing" in expansions[0]["prompt"]
+    assert expansions[0]["agent"] == "seed_reviewer"
+    assert len(calls) == 2 and "The hosts are divorcing." in calls[1]["prompt"]
+    record = json.loads((tmp_path / "out" / "state" / "seed.json").read_text())
+    assert record["original"] == SEED and record["current"] == EXPANDED
+    assert (tmp_path / "out" / "seed.md").read_text() == EXPANDED
+    assert (tmp_path / "out" / "interim" / "seed_round_01.md").exists()
 
 
-def test_unanswered_questions_need_no_recheck_and_enter_keeps_the_request(
+def test_the_loop_runs_until_the_author_is_done(tmp_path, monkeypatch):
+    _config(tmp_path)
+    _llm(monkeypatch, _assessment(), _assessment(), _assessment())
+    second = EXPANDED + "\nSaturday: a power cut.\n"
+    _expander(monkeypatch, EXPANDED, second)
+    _answers(monkeypatch, "a", "divorcing", "", "", "", "a", "skip",
+             "add a power cut", "", "d", "k")
+    out = seed_review.run_seed_review(SEED)
+    assert out["seed"] == second
+    record = json.loads((tmp_path / "out" / "state" / "seed.json").read_text())
+    assert record["rounds"] == 2 and record["current"] == second
+
+
+def test_an_undone_expansion_keeps_the_seed_and_passes_the_answers_on(
+        tmp_path, monkeypatch):
+    _config(tmp_path)
+    calls = _llm(monkeypatch, _assessment(), _assessment(questions=[]))
+    _expander(monkeypatch, EXPANDED)
+    _answers(monkeypatch, "a", "Yes: the hosts are divorcing", "", "",
+             "u", "d", "")
+    out = seed_review.run_seed_review(SEED)
+    assert out["seed"] == SEED
+    assert out["clarifications"][0]["answer"] == "Yes: the hosts are divorcing"
+    assert "the hosts are divorcing" in calls[1]["prompt"]   # still known
+    assert not (tmp_path / "out" / "state" / "seed.json").exists()
+
+
+def test_an_expansion_that_loses_material_is_not_offered(tmp_path,
+                                                         monkeypatch, capsys):
+    _config(tmp_path)
+    seed = SEED + "\n## Characters\n- **Kirsty** - the host.\n" \
+                  "- **Stuart** - her husband.\n"
+    _llm(monkeypatch, _assessment(), _assessment(questions=[]))
+    _expander(monkeypatch, seed.replace("- **Stuart** - her husband.\n", "")
+              + "\nMore material " * 20)
+    _answers(monkeypatch, "a", "an answer", "", "", "d", "")
+    out = seed_review.run_seed_review(seed)
+    text = capsys.readouterr().out
+    assert "The expansion was not used: character(s) no longer listed: " \
+        "Stuart" in text
+    assert out["seed"] == seed
+    assert out["clarifications"][0]["answer"] == "an answer"
+
+
+def test_lost_material_checks():
+    before = ("# T\n\n## Characters\n- **Ann** - a pilot.\n\n"
+              "## Constraints\n- Never name the city.\n\n"
+              "## Outline\n- Chapter 1: Start - she lands.\n"
+              "- Chapter 2: End - she leaves.\n")
+    assert seed_review.lost_material(before, before + "\nMore.\n") == []
+    problems = seed_review.lost_material(
+        before, "# T\n\n## Characters\n- **Bo** - a cook. " + "word " * 40
+        + "\n\n## Constraints\n- Never name the town.\n\n"
+        "## Outline\n- Chapter 1: Start - she lands.\n")
+    joined = " | ".join(problems)
+    assert "no longer listed: Ann" in joined
+    assert "constraint(s) reworded or removed" in joined
+    assert "outline chapters dropped (2 -> 1)" in joined
+    assert "shorter" in " | ".join(seed_review.lost_material(before, "# T\n"))
+
+
+def test_nothing_to_add_settles_the_seed_without_an_expansion(
         tmp_path, monkeypatch):
     _config(tmp_path)
     calls = _llm(monkeypatch, _assessment())
-    _answers(monkeypatch, "skip", "")
+    _expander(monkeypatch)                             # must not be called
+    _answers(monkeypatch, "a", "skip", "", "")
     out = seed_review.run_seed_review(SEED)
     assert len(calls) == 1
-    assert out["chapters"] == 25
+    assert out["chapters"] == 25 and out["seed"] == SEED
     assert all(not c["answered"] for c in out["clarifications"])
 
 
 def test_custom_size(tmp_path, monkeypatch):
     _config(tmp_path)
     _llm(monkeypatch, _assessment(questions=[]))
-    _answers(monkeypatch, "c", "12", "1800")
+    _answers(monkeypatch, "d", "c", "12", "1800")
     out = seed_review.run_seed_review(SEED)
     assert (out["chapters"], out["words_per_chapter"]) == (12, 1800)
+
+
+def test_stopping_after_an_expansion_keeps_the_master(tmp_path, monkeypatch):
+    _config(tmp_path)
+    _llm(monkeypatch, _assessment(), _assessment())
+    _expander(monkeypatch, EXPANDED)
+    _answers(monkeypatch, "a", "divorcing", "", "", "k", "s")
+    out = seed_review.run_seed_review(SEED)
+    assert out["stop"] and out["seed"] == EXPANDED
+    assert (tmp_path / "out" / "state" / "seed.json").exists()
+    assert not (tmp_path / "out" / "state" / "plan.json").exists()
 
 
 def test_stop(tmp_path, monkeypatch):
@@ -341,8 +432,8 @@ def test_apply_plan_restores_the_chosen_chapter_length(tmp_path):
 
 def test_stopping_writes_nothing_to_resume(tmp_path, monkeypatch):
     _config(tmp_path)
-    monkeypatch.setattr(pipeline, "run_seed_review", lambda *a: {
-        "chapters": None, "words_per_chapter": 2000, "clarifications": [],
+    monkeypatch.setattr(pipeline, "run_seed_review", lambda seed, *a, **k: {
+        "seed": seed, "chapters": None, "words_per_chapter": 2000, "clarifications": [],
         "stop": True})
     monkeypatch.setattr(pipeline, "run_architect",
                         lambda *a: pytest.fail("must not run"))
@@ -363,3 +454,70 @@ def test_the_seed_review_has_its_own_agent_settings(tmp_path, monkeypatch):
     calls = _llm(monkeypatch, _assessment(questions=[]))
     seed_review.assess(SEED, None)
     assert calls[0]["agent"] == "seed_reviewer"
+
+
+# ------------------------------------------- the master seed across restarts
+
+def _args(**kw):
+    import argparse
+    base = dict(demo=False, seed=None, prompt=None)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def _stopped_review_state():
+    return {"seed": {"original": SEED, "current": EXPANDED,
+                     "pending": [{"question": "Q", "answer": "A",
+                                  "answered": True}], "rounds": 1},
+            "bible": None, "chapters": None, "final": {}}
+
+
+def test_a_restart_continues_from_the_master_seed():
+    state = _stopped_review_state()
+    assert pipeline.check_resume(_args(), state, None) == EXPANDED
+    # the author's original seed file, or the master itself, is the same run
+    assert pipeline.check_resume(_args(prompt=SEED), state, None) == EXPANDED
+    assert pipeline.check_resume(_args(prompt=EXPANDED), state, None) == \
+        EXPANDED
+    with pytest.raises(SystemExit):
+        pipeline.check_resume(_args(prompt="another book"), state, None)
+
+
+def test_a_finished_review_with_an_expansion_keeps_using_it():
+    state = {"seed": {"original": SEED, "current": EXPANDED},
+             "bible": {"title": "T", "seed": EXPANDED}, "chapters": None,
+             "final": {}}
+    assert pipeline.check_resume(_args(prompt=SEED), state, None) == EXPANDED
+
+
+def test_a_stopped_review_is_resumable(tmp_path):
+    from shared.resume import has_resume, save_state
+    _config(tmp_path)
+    assert not has_resume()
+    save_state("seed", _stopped_review_state()["seed"])
+    assert has_resume()
+
+
+def test_resuming_a_stopped_review_reruns_it_from_the_master(tmp_path,
+                                                            monkeypatch):
+    _config(tmp_path)
+    seen = {}
+
+    def review(seed, num_chapters=None, **kwargs):
+        seen.update(seed=seed, **kwargs)
+        return {"seed": seed, "chapters": None, "words_per_chapter": 2000,
+                "clarifications": [], "stop": True}
+
+    monkeypatch.setattr(pipeline, "run_seed_review", review)
+    state = {**_stopped_review_state(), "research": {}, "drafts": {},
+             "summaries": None, "chronology": None, "unreviewed": set()}
+    assert pipeline.run_pipeline(EXPANDED, resuming=True, state=state) == 0
+    assert seen["seed"] == EXPANDED and seen["original"] == SEED
+    assert seen["clarifications"][0]["answer"] == "A"
+
+
+def test_a_saved_bible_without_a_seed_falls_back_to_the_given_one():
+    state = {"bible": {"title": "T"}, "chapters": None, "final": {}}
+    assert pipeline.check_resume(_args(prompt="MY SEED"), state, None) == \
+        "MY SEED"
+    assert pipeline.check_resume(_args(), state, None)      # bundled example

@@ -126,6 +126,7 @@ def _populate(out):
     (out / "chapters" / "chapter_01.md").write_text("# Chapter 1\n\nText")
     (out / "draft.md").write_text("the old book")
     (out / "story_bible.md").write_text("bible")
+    (out / "seed.md").write_text("the expanded seed")
 
 
 def test_archive_moves_the_previous_run_instead_of_deleting(tmp_path):
@@ -139,6 +140,7 @@ def test_archive_moves_the_previous_run_instead_of_deleting(tmp_path):
     assert (dest / "chapters" / "chapter_01.md").read_text().endswith("Text")
     assert (dest / "draft.md").read_text() == "the old book"
     assert (dest / "story_bible.md").exists()
+    assert (dest / "seed.md").exists()
     # the output dir is clean for the new run
     for gone in ("state", "interim", "chapters", "draft.md", "story_bible.md"):
         assert not (out / gone).exists()
@@ -181,7 +183,7 @@ def test_a_fresh_pipeline_run_archives_before_it_starts(tmp_path, monkeypatch):
     import main as pipeline
     out = _use_config(tmp_path)
     _populate(out)
-    monkeypatch.setattr(pipeline, "run_seed_review", lambda *a, **k: {"chapters": None, "words_per_chapter": 100,
+    monkeypatch.setattr(pipeline, "run_seed_review", lambda seed, *a, **k: {"seed": seed, "chapters": None, "words_per_chapter": 100,
                                     "clarifications": [], "stop": False})
     monkeypatch.setattr(pipeline, "run_architect", lambda *a: None)
     monkeypatch.setattr(pipeline, "run_planner", lambda **k: [])   # stops early

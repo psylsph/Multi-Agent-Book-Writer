@@ -77,7 +77,7 @@ def archive_previous_run():
     cfg = get_config()["output"]
     out = Path(cfg["directory"])
     candidates = [out / "state", out / "interim", out / "chapters",
-                  out / "story_bible.md"]
+                  out / "story_bible.md", out / "seed.md"]
     if cfg.get("overwrite", True):          # otherwise the -N naming applies
         candidates.append(out / cfg.get("filename", "draft.md"))
     present = [p for p in candidates if p.exists()

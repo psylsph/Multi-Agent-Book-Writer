@@ -32,7 +32,8 @@ Python 3.11, 3.12 and 3.13. Keep `uv.lock` in sync: add dependencies with
 main.py            CLI + orchestration: STAGES (the pipeline steps), run_pipeline,
                    run_interleaved, resume checks
 agents/            one module per pipeline stage
-  seed_review.py   step 0: can the seed carry the requested length? asks questions
+  seed_review.py   step 0: critique the seed, expand it with the author's answers
+                   (a loop), settle the size; saves the MASTER seed
   architect.py     step 1: seed -> story bible (JSON); seed characters/constraints taken verbatim
   planner.py       step 2: outline; a seed's own outline is parsed deterministically and wins
   researcher.py    step 3: per-chapter lore brief (+ optional SearXNG fact-check)
@@ -101,6 +102,11 @@ written, edited and has its story state re-extracted before the next is drafted.
   archives the previous one (`archive_previous_run`) instead of deleting it;
   revisions/polishes that shrink a chapter or add findings are rejected and the
   previous version kept.
+- **The master seed.** When the seed review expands the seed, the expansion is
+  the seed for everything after it and for any restart (`state/seed.json`:
+  `original`, `current`, `pending`). `main.check_resume` accepts the original
+  or the master as "the same run". `lost_material()` must keep rejecting an
+  expansion that drops a character, constraint or outline chapter.
 - **Verbatim over LLM transcription.** Seed characters, constraints, author notes
   and outlines are parsed deterministically (`llm_utils.py`, `planner.py`) and
   override what the model returns. Don't route them through the model.

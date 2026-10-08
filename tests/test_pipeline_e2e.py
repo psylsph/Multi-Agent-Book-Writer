@@ -279,3 +279,32 @@ def test_a_server_without_json_mode_is_handled_gracefully(tmp_path,
                                          llm="  json_mode: true\n")) == 0
     assert capsys.readouterr().out.count("rejected response_format") == 1
     assert not any("response_format" in c["payload"] for c in fake.calls)
+
+
+def test_an_expanded_seed_is_the_master_across_a_restart(tmp_path, monkeypatch,
+                                                        capsys):
+    """Run 1: answer, expand, keep, stop. Run 2 (same command): the review
+    continues from the expanded seed, and the book is written from it."""
+    from agents import seed_review
+    cfg = write_config(tmp_path, book="  seed_review: ask\n")
+    fake = FakeLLM().install(monkeypatch)
+    answers = []
+    monkeypatch.setattr(seed_review, "interactive", lambda: True)
+    monkeypatch.setattr(seed_review, "_input", lambda prompt: answers.pop(0))
+
+    # menu: answer; note; keep the expansion; menu again: stop
+    answers[:] = ["a", "The ferry sinks on the way back.", "k", "s"]
+    assert run(monkeypatch, cfg) == 0
+    assert "The ferry sinks" in (out(tmp_path) / "seed.md").read_text()
+    assert "architect" not in fake.kinds
+    assert "expanded seed is saved as the master" in capsys.readouterr().out
+
+    answers[:] = ["d", ""]               # the review resumes: done; size
+    assert run(monkeypatch, cfg) == 0
+    text = capsys.readouterr().out
+    assert "Continuing from the expanded seed" in text
+    architect = next(c for c in fake.calls if c["kind"] == "architect")
+    assert "The ferry sinks" in architect["payload"]["messages"][-1]["content"]
+    assert (out(tmp_path) / "book.md").exists()
+    bible = json.loads((out(tmp_path) / "state" / "bible.json").read_text())
+    assert "The ferry sinks" in bible["seed"]

@@ -222,10 +222,25 @@ are divided.
 2. Code, not the model, does the arithmetic: words per scene at the requested
    size (a scene usually runs 1,000–3,000 words) and whether there are more
    chapters than scenes.
-3. On a terminal it asks up to `book.seed_questions` questions about gaps that
-   would change the book: a missing subplot, the ending, point of view. Press
-   Enter to accept the assumption shown, or type `skip` to accept all the rest.
-   If you answered any, the size is checked again with your answers.
+3. On a terminal the review becomes a loop that grows the seed with you. Each
+   round shows the critique and asks what next:
+
+   ```
+   [a] answer the questions and/or add your own notes; the seed is then expanded with them  (Enter)
+   [d] done: the seed is ready; go on to the book's size
+   [s] stop here: anything expanded so far is saved; rerun to continue
+   ```
+
+   With `a` it asks up to `book.seed_questions` questions about gaps that would
+   change the book (a missing subplot, the ending, point of view; Enter accepts
+   the assumption shown, `skip` accepts all the rest), then lets you add notes
+   of your own. The model then **expands the seed** with your answers: it keeps
+   every word you wrote and adds the new material where it belongs (a character
+   under Characters, an event in the Outline). You see what changed and keep it
+   (`k`) or undo it (`u`; your answers are then passed on as clarifications).
+   The expanded seed is critiqued again, and so on until you choose `d`.
+   Code checks every expansion: if it dropped a character, reworded a
+   constraint, lost an outline chapter or got shorter, it is not used.
 4. If the size doesn't fit, it asks which to use:
 
    ```
@@ -235,7 +250,18 @@ are divided.
    [s] stop here: nothing is written, so you can edit the seed and rerun
    ```
 
-Your answers become part of the story bible, so every later stage sees them. The
+**The expanded seed is the master seed.** Each kept expansion is saved at once
+to `output/state/seed.json` and, readable, to `output/seed.md`; every later stage
+writes the book from it. A restart uses it too: rerunning the same command (with
+your original `--seed` file, or none) continues from the expanded seed, and a
+review you stopped or interrupted picks up where it left off. Each round's
+version is also kept as `output/interim/seed_round_NN.md`. To use the expanded
+seed for a brand-new run, pass `--seed output/seed.md --no-resume` (copy it out
+first: a fresh run archives `output/`).
+
+Answers that did not go into the seed (an undone expansion, or the review
+without a terminal) become part of the story bible, so every later stage sees
+them. The
 review, scene list and answers are saved to `output/interim/seed_review.md`;
 copy the answers into your seed if you want them for a fresh run. The chosen
 size is saved in `output/state/plan.json`, so a resumed run keeps it. The

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable
 
 from agents.architect import run_architect
-from agents.planner import extract_seed_outline, run_planner
+from agents.planner import run_planner
 from agents.seed_review import run_seed_review
 from agents.researcher import run_researcher
 from agents.writer import refresh_state, run_writer
@@ -75,28 +75,38 @@ def _norm_seed(text):
 def check_resume(args, state, num_chapters):
     """Decide which seed a resumed run uses and refuse unsafe resumes.
 
-    Interim files belong to ONE seed. Resuming them under a different seed
+    A saved run belongs to ONE seed. Resuming it under a different seed
     would skip every saved chapter and ship the old book under the new
-    bible, so that is an error unless --no-resume is given. With no seed
-    argument at all, the seed saved with the run is reused.
+    bible, so that is an error unless --no-resume is given. The run always
+    continues from its MASTER seed: the expansion the seed review saved, if
+    any, else the seed it started from. Passing the author's original seed
+    (or the master, e.g. --seed output/seed.md) is recognised as the same run.
     """
-    if not state["bible"]:
+    record = state.get("seed") or {}
+    if not state["bible"] and not record.get("current"):
         sys.exit("Error: the saved run in output/state/ is unreadable "
                  "(bible.json missing or corrupt). Rerun with --no-resume to "
                  "start over.")
-    stored = state["bible"].get("seed", "")
+    bible_seed = (state["bible"] or {}).get("seed", "")
+    master = record.get("current") or bible_seed
+    accepted = {_norm_seed(t) for t in (record.get("original"), master,
+                                        bible_seed) if t}
+    expanded = bool(record.get("current"))
     explicit = bool(args.demo or args.seed or args.prompt)
-    if not explicit and stored:
-        print("[RESUME] Reusing the seed saved with the run.")
-        seed_text = stored
-    else:
-        seed_text = resolve_seed_text(args)
-        if stored and _norm_seed(seed_text) != _norm_seed(stored):
+    given = None
+    if explicit or not master:
+        given = resolve_seed_text(args)
+        if accepted and _norm_seed(given) not in accepted:
             sys.exit(
                 "Error: the saved run is for a DIFFERENT seed. "
                 "Resuming would reuse its chapters for this seed. Rerun with "
                 "--no-resume to start fresh, or pass the original seed to "
                 "resume.")
+    if master:
+        print("[RESUME] Continuing from the expanded seed the seed review "
+              "saved (output/seed.md)." if expanded else
+              "[RESUME] Reusing the seed saved with the run.")
+    seed_text = master or given
     saved = state["chapters"] or []
     if num_chapters and saved and len(saved) != num_chapters:
         sys.exit(f"Error: the saved run has {len(saved)} chapters but "
@@ -131,6 +141,8 @@ def apply_plan(plan):
 
 def _hydrate_resume(state):
     """Push loaded resume state into the shared context."""
+    if (state.get("seed") or {}).get("current"):
+        update_context("seed", state["seed"]["current"])
     if state["bible"]:
         update_context("bible", state["bible"])
         update_context("title", state["bible"].get("title", ""))
@@ -227,6 +239,8 @@ class Run:
     plan_only: bool = False
     interleave: bool = False          # book.review_as_you_go (and editor on)
     clarifications: list = field(default_factory=list)
+    original_seed: str | None = None  # the author's seed, when seed_text is
+                                      # the seed review's expansion of it
 
 
 @dataclass(frozen=True)
@@ -248,12 +262,21 @@ class Stage:
 
 
 def _seed_review(run):
+    original = run.original_seed or run.seed_text
     plan = run_seed_review(run.seed_text, run.num_chapters,
-                           len(extract_seed_outline(run.seed_text)))
+                           original=original,
+                           clarifications=run.clarifications)
+    run.seed_text = plan["seed"]          # the master seed from here on
     if plan["stop"]:
-        print("\n[PIPELINE] Stopped at the seed review; nothing was "
-              "written. Edit the seed (see output/interim/"
-              "seed_review.md) and rerun.")
+        if plan["seed"] != original:
+            print("\n[PIPELINE] Stopped at the seed review. The expanded seed "
+                  "is saved as the master seed (output/seed.md). Rerun the "
+                  "same command to continue reviewing it, or add "
+                  "--no-resume to start over from your original seed.")
+        else:
+            print("\n[PIPELINE] Stopped at the seed review; nothing was "
+                  "written. Edit the seed (see output/interim/"
+                  "seed_review.md) and rerun.")
         return 0
     run.clarifications = plan["clarifications"]
     run.num_chapters = apply_plan(plan) or run.num_chapters
@@ -297,8 +320,10 @@ def _save_drafts(run):
 
 
 STAGES = (
+    # on resume only when the run stopped during the seed review (no bible)
     Stage("seed review", "Step 0: Seed review (length and gaps)",
-          _seed_review, wanted=lambda run: not run.resuming),
+          _seed_review,
+          wanted=lambda run: not run.resuming or not get_context("bible")),
     Stage("architect", "Step 1: Architect (story bible)", _architect,
           done=lambda run: (run.resuming and get_context("bible")
                             and "Story bible loaded from the saved run; "
@@ -394,6 +419,11 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None,
         state = state or load_state()
         _hydrate_resume(state)
         print(f"[RESUME] Loaded {summarize_for_log(state)}.")
+        record = state.get("seed") or {}
+        if record.get("current") and not state["bible"]:
+            # stopped during the seed review: continue its loop
+            run.original_seed = record.get("original")
+            run.clarifications = list(record.get("pending") or [])
         # the size the seed review settled when the run began
         run.num_chapters = num_chapters or apply_plan(load_plan())
     else:

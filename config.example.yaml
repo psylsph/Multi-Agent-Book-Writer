@@ -19,13 +19,16 @@ book:
   # Before anything is written, check that the seed holds enough story for the
   # book's length (scenes it supplies, story timespan, words per scene), ask a
   # few questions about gaps, and push back on a size the material can't fill.
-  #   ask  - show the review, ask the questions, let you keep the requested
-  #          size, take the recommended one, choose your own, or stop to edit
-  #          the seed (default; behaves like warn without a terminal)
+  #   ask  - a loop: show the review, ask the questions, expand the seed with
+  #          your answers and notes, review the expanded seed again... until
+  #          you are done; then keep the requested size, take the recommended
+  #          one, choose your own, or stop. The expanded seed is saved as the
+  #          master seed (output/seed.md) that the book and any restart use.
+  #          (Default; behaves like warn without a terminal.)
   #   warn - show the review and carry on with the requested size
   #   off  - skip it (the planner sizes the book as before)
   seed_review: ask
-  seed_questions: 5       # most questions to ask (0 = none)
+  seed_questions: 5       # most questions to ask per round (0 = none)
 
   # Target length per chapter. The writer is asked for between
   # words_per_chapter * word_count_tolerance and words_per_chapter * 1.2.
@@ -151,7 +154,8 @@ llm:
 # here; leave it commented out to use the model's own default sampling (some
 # models have their best settings built in).
 agents:
-  seed_reviewer:          # step 0: can the seed carry the book's length?
+  seed_reviewer:          # step 0: critiques the seed and expands it with
+                          # your answers
     # model: other-model
     # temperature: 0.7
     # enable_thinking: true

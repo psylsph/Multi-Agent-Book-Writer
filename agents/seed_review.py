@@ -5,22 +5,32 @@ Checks, before anything is written, that the seed can carry the book's length.
 An LLM reads the seed and lists the scenes it really supplies (each backed by a
 quote that must be found in the seed), the story's timespan, and the length
 the material would naturally fill. Code does the arithmetic (words per scene,
-chapters per scene) rather than trusting the model with it. On a terminal it
-then asks the author a few questions about gaps, re-checks with the answers,
-and lets the author keep the requested size, take the recommended one, choose
-their own, or stop to edit the seed.
+chapters per scene) rather than trusting the model with it.
+
+On a terminal the review is a loop: the author answers the critique's
+questions (and adds notes), the LLM expands the seed with them, the author
+keeps or undoes the expansion, and the expanded seed is critiqued again,
+until the author is done. Code checks that an expansion kept every character,
+constraint and outline chapter. A kept expansion becomes the run's MASTER
+seed (state/seed.json and seed.md) that every later stage and any restart
+uses. Finally the author keeps the requested size, takes the recommended one,
+chooses their own, or stops.
 
 Modes (book.seed_review, or --seed-review): ask (default; falls back to warn
 without a terminal), warn (report only, never prompts), off.
 """
 
+import difflib
 import sys
+from pathlib import Path
 
+from agents.planner import extract_seed_outline
 from shared import prompts
-from shared.llm_client import AbortRun, generate_with_wait, \
+from shared.llm_client import AbortRun, generate_prose, generate_with_wait, \
     get_config
-from shared.llm_utils import extract_json
-from shared.output import save_interim
+from shared.llm_utils import (clean_llm_text, extract_json,
+                              extract_seed_characters, extract_seed_extras)
+from shared.output import atomic_write_text, save_interim
 from shared.resume import save_state
 from shared.web_search import quote_in_text
 
@@ -404,73 +414,256 @@ def decide(requested, recommended):
         print("  Please type one of the letters shown.")
 
 
+# ------------------------------------------------------- expanding the seed
+
+# An expansion shorter than this has dropped the author's material.
+EXPANSION_MIN_RATIO = 0.9
+SHOWN_CHANGES = 40      # changed lines printed after an expansion
+
+
+def master_path():
+    """The human-readable copy of the master seed (reusable with --seed)."""
+    return Path(get_config()["output"]["directory"]) / "seed.md"
+
+
+def build_expansion_prompt(seed_text, answers):
+    lines = "\n".join(f"- Q: {a['question']}\n  A: {a['answer']}"
+                      for a in answers)
+    return f"""Expand the creative brief below with the author's answers and notes.
+
+THE AUTHOR'S ANSWERS AND NOTES
+{lines}
+
+Rules:
+- Keep EVERY line of the brief as written. You may add to a section, add bullets, or add a new section; never delete, shorten or reword what is there.
+- Keep the brief's Markdown structure: the '# Title' line, '## Section' headings, '- **Name** - description' character bullets, and, if the brief has an outline, its '- Chapter N: Title - what happens' lines.
+- Put each answer where it belongs: a new character under Characters, a new rule under Constraints, a new event in the Outline or the premise.
+- Add only what the answers and notes call for or plainly imply. Do not invent other characters, twists or an ending.
+- Write brief notes, not story prose.
+
+Return ONLY the complete expanded brief in Markdown.
+
+THE BRIEF
+\"\"\"{seed_text}\"\"\"
+"""
+
+
+def expand(seed_text, answers):
+    """The seed rewritten with `answers` built in (one LLM call)."""
+    text = clean_llm_text(generate_prose(
+        build_expansion_prompt(seed_text, answers),
+        system=prompts.SEED_EXPANDER, agent="seed_reviewer"))
+    lines = text.splitlines()
+    while lines and lines[0].strip() in ('"""', ""):    # echoed delimiters
+        lines.pop(0)
+    while lines and lines[-1].strip() in ('"""', ""):
+        lines.pop()
+    return "\n".join(lines).strip() + "\n"
+
+
+def _flat(text):
+    return " ".join(str(text).lower().split())
+
+
+def lost_material(before, after):
+    """What `after` dropped from the author's `before`, as reasons (empty
+    when nothing was lost). Checked in code, not trusted to the model: the
+    characters, constraints and outline chapters are parsed verbatim later,
+    so losing one would change the book."""
+    problems = []
+    words_before, words_after = len(before.split()), len(after.split())
+    if words_after < EXPANSION_MIN_RATIO * words_before:
+        problems.append(f"it is shorter ({words_before:,} -> "
+                        f"{words_after:,} words)")
+    kept = {c["name"].lower() for c in extract_seed_characters(after)}
+    gone = [c["name"] for c in extract_seed_characters(before)
+            if c["name"].lower() not in kept]
+    if gone:
+        problems.append("character(s) no longer listed: " + ", ".join(gone))
+    constraints, _ = extract_seed_extras(before)
+    flat_after = _flat(after)
+    changed = [c for c in constraints if _flat(c) not in flat_after]
+    if changed:
+        problems.append(f"{len(changed)} constraint(s) reworded or removed "
+                        f"(e.g. '{changed[0][:60]}')")
+    outline_before = len(extract_seed_outline(before))
+    outline_after = len(extract_seed_outline(after))
+    if outline_after < outline_before:
+        problems.append(f"outline chapters dropped ({outline_before} -> "
+                        f"{outline_after})")
+    return problems
+
+
+def show_changes(before, after, rounds):
+    """Print the lines an expansion added or changed."""
+    changes = [line for line in difflib.unified_diff(
+        before.splitlines(), after.splitlines(), lineterm="", n=0)
+        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))]
+    print(f"\n[SEED REVIEW] The expanded seed ({len(before.split()):,} -> "
+          f"{len(after.split()):,} words). What changed:")
+    for line in changes[:SHOWN_CHANGES]:
+        print("  " + line)
+    if len(changes) > SHOWN_CHANGES:
+        print(f"  ... and {len(changes) - SHOWN_CHANGES} more changed lines "
+              f"(full text: interim/seed_round_{rounds:02d}.md)")
+
+
+def save_master(original, seed, pending, rounds):
+    """Save the expanded seed as the run's master seed: in the state store
+    (what a restart uses; raises StateWriteError) and as seed.md beside the
+    book (best effort; reusable with --seed)."""
+    save_state("seed", {"original": original, "current": seed,
+                        "pending": pending, "rounds": rounds})
+    try:
+        atomic_write_text(master_path(), seed)
+    except OSError as e:
+        print(f"[SEED REVIEW] Could not write {master_path()}: {e}")
+
+
+def _round_menu(assessment, flag):
+    """[a]nswer and expand, [d]one, or [s]top."""
+    open_points = bool(assessment["questions"]) or needs_decision(
+        assessment, flag)
+    default = "a" if open_points else "d"
+    marks = {k: "  (Enter)" if k == default else "" for k in "ads"}
+    print("\n[SEED REVIEW] What next?")
+    print("  [a] " + ("answer the questions and/or add your own notes"
+                      if assessment["questions"] else "add your own notes")
+          + "; the seed is then expanded with them" + marks["a"])
+    print("  [d] done: the seed is ready; go on to the book's size"
+          + marks["d"])
+    print("  [s] stop here: anything expanded so far is saved; rerun to "
+          "continue" + marks["s"])
+    while True:
+        choice = _ask("  > ", default).lower()[:1]
+        if choice in ("a", "d", "s"):
+            return choice
+        print("  Please type a, d or s.")
+
+
+def _keep_expansion():
+    print("\n  [k] keep it and review the expanded seed  (Enter)")
+    print("  [u] undo: keep the previous version (your answers are passed on)")
+    while True:
+        choice = _ask("  > ", "k").lower()[:1]
+        if choice in ("k", "u"):
+            return choice == "k"
+        print("  Please type k or u.")
+
+
 # ------------------------------------------------------------------- the step
 
-def run_seed_review(seed_text, num_chapters=None, outline_chapters=0):
-    """Review the seed and settle the book's size.
+def run_seed_review(seed_text, num_chapters=None, original=None,
+                    clarifications=()):
+    """Review the seed, grow it with the author, and settle the book's size.
 
-    Returns {"chapters": int or None, "words_per_chapter": int,
-    "clarifications": [...], "stop": bool}. chapters None means "let the
-    planner decide as before" (review off or failed with nothing requested).
-    Never raises except AbortRun.
+    In ask mode each round critiques the current seed; the author answers
+    its questions (and adds notes), the LLM expands the seed with them, the
+    author keeps or undoes that, and the expanded seed is critiqued again,
+    until the author is done. Every kept expansion becomes the run's master
+    seed (state + seed.md), so a restart continues from it.
+
+    seed_text: the seed to review (on resume: the master seed so far)
+    original: the author's own seed, when seed_text is an expansion of it
+    clarifications: answers not yet built into seed_text (resume)
+
+    Returns {"seed": the seed to write the book from, "chapters": int or
+    None, "words_per_chapter": int, "clarifications": [...], "stop": bool}.
+    chapters None means "let the planner decide as before" (review off or
+    failed with nothing requested). Never raises except AbortRun.
     """
     book = get_config()["book"]
     wpc = int(book["words_per_chapter"])
-    result = {"chapters": None, "words_per_chapter": wpc,
-              "clarifications": [], "stop": False}
+    original = original or seed_text
+    result = {"seed": seed_text, "chapters": None, "words_per_chapter": wpc,
+              "clarifications": list(clarifications), "stop": False}
     how = mode()
     if how == "off":
         return result
     max_q = int(book["seed_questions"]) if how == "ask" else 0
     print("[SEED REVIEW] Checking that the seed can carry the book's length...")
 
-    # the first call is told the size we already know (-c or the outline);
-    # a length stated in the seed is found by the model itself
-    size_hint = requested_size(num_chapters, outline_chapters, {}, wpc)
-
-    def checked(clarifications=()):
-        a = assess(seed_text, size_hint, max_q if not clarifications else 0,
-                   clarifications)
-        req = requested_size(num_chapters, outline_chapters, a["stated"], wpc)
+    def checked(seed, pending):
+        # the call is told the size we already know (-c or the outline); a
+        # length stated in the seed is found by the model itself
+        outline = len(extract_seed_outline(seed))
+        hint = requested_size(num_chapters, outline, {}, wpc)
+        a = assess(seed, hint, max_q, pending)
+        req = requested_size(num_chapters, outline, a["stated"], wpc)
         rec = recommended_size(a, (req or {}).get("words_per_chapter", wpc))
         notes, flag = arithmetic(a, req or rec)
         return a, req, rec, notes, flag
 
-    try:
-        assessment, requested, recommended, notes, flag = checked()
-    except AbortRun:
-        raise
-    except Exception as e:
-        print(f"[SEED REVIEW] Could not review the seed ({e}); planning as "
-              "before.")
-        return result
-
-    shown = False
-    if how == "ask" and assessment["questions"]:
-        print("\n" + report(assessment, requested, recommended, notes, flag))
-        shown = True
-        clarifications = ask_questions(assessment["questions"])
-        result["clarifications"] = clarifications
-        if any(c["answered"] for c in clarifications):
-            print("\n[SEED REVIEW] Re-checking the size with your answers...")
-            size_hint = requested
-            try:
-                assessment, requested, recommended, notes, flag = checked(
-                    clarifications)
-                shown = False
-            except AbortRun:
-                raise
-            except Exception as e:
-                print(f"[SEED REVIEW] Re-check failed ({e}); using the first "
-                      "assessment.")
-
-    text = report(assessment, requested, recommended, notes, flag)
-    if not shown:
+    seed, pending = seed_text, list(clarifications)
+    rounds = 0
+    assessment = None
+    while True:
+        try:
+            assessment, requested, recommended, notes, flag = checked(
+                seed, pending)
+        except AbortRun:
+            raise
+        except Exception as e:
+            print(f"[SEED REVIEW] Could not review the seed ({e}); planning "
+                  "as before.")
+            result.update(seed=seed, clarifications=pending)
+            return result
+        text = report(assessment, requested, recommended, notes, flag)
         print("\n" + text)
-    save_interim("seed_review.md", text + (
-        "\n" + clarifications_markdown(result["clarifications"])
-        if result["clarifications"] else ""))
+        save_interim("seed_review.md", text + (
+            "\n" + clarifications_markdown(pending) if pending else ""))
+        if how != "ask":
+            break
 
+        choice = _round_menu(assessment, flag)
+        if choice == "s":
+            result.update(seed=seed, clarifications=pending, stop=True)
+            return result
+        if choice == "d":
+            break
+        answers = [c for c in ask_questions(assessment["questions"])
+                   if c["answered"]]
+        note = _ask("\n  Anything else to add or change in the seed? "
+                    "(Enter for nothing)\n  > ")
+        if note:
+            answers.append({"question": "The author adds", "answer": note,
+                            "answered": True})
+        if not answers:
+            print("[SEED REVIEW] Nothing new to add; the seed stands as it is.")
+            break
+
+        to_build = pending + answers
+        rounds += 1
+        print(f"\n[SEED REVIEW] Round {rounds}: expanding the seed with your "
+              "answers...")
+        try:
+            expanded = expand(seed, to_build)
+            problems = lost_material(seed, expanded)
+        except AbortRun:
+            raise
+        except Exception as e:
+            problems = [f"the expansion failed ({e})"]
+        if problems:
+            print("[SEED REVIEW] The expansion was not used: "
+                  + "; ".join(problems) + ". Your answers are kept and "
+                  "passed on.")
+            pending = to_build
+            continue
+        save_interim(f"seed_round_{rounds:02d}.md", expanded)
+        show_changes(seed, expanded, rounds)
+        if _keep_expansion():
+            seed, pending = expanded, []
+            save_master(original, seed, pending, rounds)
+            print(f"[SEED REVIEW] The expanded seed is now the master seed "
+                  f"({master_path()}). Reviewing it again...")
+        else:
+            pending = to_build
+            if seed != original:
+                save_master(original, seed, pending, rounds)
+            print("[SEED REVIEW] Kept the previous version; your answers are "
+                  "passed on.")
+
+    result.update(seed=seed, clarifications=pending)
     if how == "ask" and (needs_decision(assessment, flag) or not requested):
         chosen = decide(requested, recommended)
         if chosen is None:

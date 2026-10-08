@@ -598,7 +598,7 @@ def test_hydrating_resume_state_fills_the_context(tmp_path):
 
 
 def _stub_pipeline(monkeypatch, **replace):
-    stubs = dict(run_seed_review=lambda *a, **k: {"chapters": None, "words_per_chapter": 100,
+    stubs = dict(run_seed_review=lambda seed, *a, **k: {"seed": seed, "chapters": None, "words_per_chapter": 100,
                                     "clarifications": [], "stop": False},
                  run_architect=lambda *a: None,
                  run_planner=lambda **k: update_context(

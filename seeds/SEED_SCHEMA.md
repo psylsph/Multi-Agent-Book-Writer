@@ -6,6 +6,9 @@ authoritative reference for what the parsers recognize.
 
 - **Format**: plain Markdown, UTF-8, `.md` or `.txt`
 - **Input**: `--seed FILE` (or the same text inline via `--prompt TEXT`)
+- **Expansion**: the seed review (`book.seed_review: ask`) can grow your seed
+  with your answers; the expanded seed keeps this format and is saved as
+  `output/seed.md`, the run's master seed (see the README's *Seed review*)
 - **Inspection**: after a run, `output/interim/story_bible.md` (or
   `output/story_bible.md`) shows exactly what was extracted
 

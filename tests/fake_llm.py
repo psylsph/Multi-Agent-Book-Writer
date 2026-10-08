@@ -87,6 +87,7 @@ class FakeLLM:
     def kind(self, prompt):
         for phrase, kind in (
                 ("Assess this creative brief", "seed_review"),
+                ("Expand the creative brief", "expand"),
                 ("Decide how many chapters", "suggest"),
                 ("You are a story architect", "architect"),
                 ("planning the chapter outline", "planner"),
@@ -113,6 +114,9 @@ class FakeLLM:
                 "verdict": "about_right", "reasons": ["fits"],
                 "recommended": {"chapters": 2, "words_per_chapter": 100},
                 "to_fill_requested": [], "questions": []})
+        if kind == "expand":                 # the brief, plus one new section
+            brief = prompt.split('THE BRIEF\n"""', 1)[1].rsplit('"""', 1)[0]
+            return brief + "\n## Subplot\n\nThe ferry sinks on the way back.\n"
         if kind == "suggest":
             return json.dumps({"chapters": 2, "reason": "short"})
         if kind == "architect":
