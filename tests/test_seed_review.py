@@ -354,3 +354,12 @@ def test_stopping_writes_nothing_to_resume(tmp_path, monkeypatch):
 def _clean():
     yield
     reset_context()
+
+
+def test_the_seed_review_has_its_own_agent_settings(tmp_path, monkeypatch):
+    """agents.seed_reviewer (model, temperature...) applies, not the
+    planner's."""
+    _config(tmp_path)
+    calls = _llm(monkeypatch, _assessment(questions=[]))
+    seed_review.assess(SEED, None)
+    assert calls[0]["agent"] == "seed_reviewer"

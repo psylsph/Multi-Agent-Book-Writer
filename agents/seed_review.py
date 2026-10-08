@@ -194,7 +194,7 @@ def assess(seed_text, size, max_questions=5, clarifications=()):
     """One assessment call. Raises on an unusable reply (and on an outage)."""
     raw = generate_with_wait(
         build_prompt(seed_text, size, max_questions, clarifications),
-        system=prompts.SEED_REVIEWER, agent="planner", json_mode=True)
+        system=prompts.SEED_REVIEWER, agent="seed_reviewer", json_mode=True)
     return parse_assessment(raw, seed_text, max_questions)
 
 

@@ -89,7 +89,7 @@ DEFAULTS = {
     },
 }
 
-AGENTS = ("architect", "planner", "researcher", "verifier", "writer",
+AGENTS = ("seed_reviewer", "architect", "planner", "researcher", "verifier", "writer",
           "extractor",
           "reviewer", "editor")
 AGENT_KEYS = {"model", "temperature", "enabled", "reasoning_effort",

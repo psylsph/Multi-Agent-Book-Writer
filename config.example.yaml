@@ -151,6 +151,11 @@ llm:
 # here; leave it commented out to use the model's own default sampling (some
 # models have their best settings built in).
 agents:
+  seed_reviewer:          # step 0: can the seed carry the book's length?
+    # model: other-model
+    # temperature: 0.7
+    # enable_thinking: true
+
   architect:              # story bible from the seed
     # model: other-model
     # temperature: 0.7
