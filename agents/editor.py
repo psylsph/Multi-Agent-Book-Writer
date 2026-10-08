@@ -22,13 +22,38 @@ from shared.consistency import (check_chronology, format_findings,
                                 repeated_phrase_finding, word_count,
                                 word_count_finding)
 from shared.story_state import merge_states
-from agents.reviewer import run_reviewer
+from agents.reviewer import UNREVIEWED, run_reviewer
 
 
 # A revision/polish that returns less than this fraction of the text it was
 # given has almost certainly summarised or truncated the chapter.
 MIN_REVISION_RATIO = 0.75
 MIN_POLISH_RATIO = 0.85
+# A revision that grows the chapter by more than this added new material (a
+# length expansion, a missing beat), which may contradict the story: it is
+# re-reviewed even when the draft passed review.
+REREVIEW_GROWTH = 0.10
+
+# What one finding weighs when a revision or polish is judged better or worse
+# than the text it replaces. A count alone would reject a revision that fixes
+# a dead character walking about but trips two word quotas.
+SEVERITY = {
+    # the story contradicts itself
+    "dead_resurrection": 5, "relationship_regression": 5,
+    "relationship_leap": 5, "knowledge": 5, "timeline": 5, "setting": 5,
+    "dead_character": 5, "already_met": 5,
+    # the chapter misses its brief, the author's rules or its length
+    "outline_gap": 3, "constraint": 3, "word_count": 3,
+    # surface problems
+    "name_mismatch": 2, "banned_word": 1, "quota": 1, "repeated_phrase": 1,
+}
+DEFAULT_SEVERITY = 3            # an issue type the reviewer made up
+
+
+def severity(lint, issues=()):
+    """Weighted total of lint findings and reviewer issues (see SEVERITY)."""
+    return (sum(SEVERITY.get(f["check"], DEFAULT_SEVERITY) for f in lint)
+            + sum(SEVERITY.get(i["type"], DEFAULT_SEVERITY) for i in issues))
 
 
 def _earlier_bodies(n, drafts, final):
@@ -160,6 +185,7 @@ def run_editor(only=None):
     polish_system = f"{prompts.POLISHER}\n\nSTORY BIBLE REFERENCE\n{reference}"
 
     final = dict(context.get("final") or {})
+    unreviewed = set(context.get("unreviewed") or ())
     for chapter in chapters:
         n, title = chapter["number"], chapter["title"]
         if only is not None and n != only:
@@ -207,13 +233,15 @@ def run_editor(only=None):
             print(f"[REVIEWER] Chapter {n}: {verdict}"
                   + (f" ({len(issues)} issues)" if issues else ""))
             notes.append(f"reviewer: {verdict}"
-                         + (f" ({len(issues)} issues)" if issues else ""))
+                         + (f" ({len(issues)} issues)" if issues else "")
+                         + (" - the reply could not be read"
+                            if verdict == UNREVIEWED else ""))
         else:
             print(f"[REVIEWER] disabled; deterministic lint only "
                   f"({len(lint)} findings)")
 
         for rnd in range(1, max_rounds + max_wc_rounds + 1):
-            if not lint and verdict == "pass":
+            if not lint and not issues:
                 break
             needs_length = any(f["check"] == "word_count" for f in lint)
             if rnd > max_rounds and not needs_length:
@@ -252,18 +280,29 @@ def run_editor(only=None):
                 break
             new_lint = full_lint(revised)
             new_verdict, new_issues = verdict, issues
-            if issues or verdict != "pass":
+            grew = (word_count(revised)
+                    > (1 + REREVIEW_GROWTH) * word_count(draft))
+            if reviewer_on and (issues or verdict != "pass" or grew):
                 new_verdict, new_issues = run_reviewer(n, title, revised)
-            if len(new_lint) + len(new_issues) > len(lint) + len(issues):
+                if new_verdict == UNREVIEWED:
+                    # an unreadable re-review is not a clean bill of health:
+                    # assume the issues it was meant to confirm are still there
+                    new_issues = issues
+                    notes.append(f"round {rnd}: re-review could not be read; "
+                                 "earlier issues assumed unfixed")
+            before, after = severity(lint, issues), \
+                severity(new_lint, new_issues)
+            if after > before:
                 print(f"[EDITOR] Revision made chapter {n} worse "
-                      f"({len(lint) + len(issues)} -> "
-                      f"{len(new_lint) + len(new_issues)} findings); "
+                      f"(severity {before} -> {after}); "
                       "keeping the previous version.")
-                notes.append(f"round {rnd}: revision rejected (more findings)")
+                notes.append(f"round {rnd}: revision rejected (severity "
+                             f"{before} -> {after})")
                 break
             notes.append(f"round {rnd}: revision accepted (findings "
                          f"{len(lint) + len(issues)} -> "
-                         f"{len(new_lint) + len(new_issues)})")
+                         f"{len(new_lint) + len(new_issues)}, severity "
+                         f"{before} -> {after})")
             draft, lint = revised, new_lint
             verdict, issues = new_verdict, new_issues
 
@@ -307,7 +346,7 @@ Return ONLY the edited chapter, starting with its original heading."""
                   "keeping pre-polish version.")
             notes.append("polish rejected (shortened the chapter)")
             body = draft
-        elif len(full_lint(body)) > len(full_lint(draft)):
+        elif severity(full_lint(body)) > severity(full_lint(draft)):
             print(f"[EDITOR] Polish introduced lint findings for chapter {n}; "
                   "keeping pre-polish version.")
             notes.append("polish rejected (introduced lint findings)")
@@ -315,6 +354,13 @@ Return ONLY the edited chapter, starting with its original heading."""
         else:
             notes.append("polish accepted")
 
+        if reviewer_on and verdict == UNREVIEWED:
+            unreviewed.add(n)
+            print(f"[EDITOR] Chapter {n}: finished WITHOUT a readable review "
+                  "(see review_chapter_NN.md).")
+        else:
+            unreviewed.discard(n)
+        update_context("unreviewed", unreviewed)
         final[n] = body
         update_context("final", final)
         save_interim(chapter_filename("diff", n),
@@ -375,6 +421,13 @@ def _write_lint_report(bodies):
              f"Target/chapter: {target_words} (min {min_words})", "",
              "## Chapter word counts", ""]
     lines += counts or ["(none)"]
+    missed = sorted(n for n in context.get("unreviewed") or () if n in bodies)
+    if missed:
+        lines += ["", "## Not reviewed", "",
+                  "The reviewer's reply could not be read for these chapters, "
+                  "so they were not checked for continuity, outline or "
+                  "constraint problems: "
+                  + ", ".join(str(n) for n in missed)]
     lines += ["", "## Findings", ""]
     if not findings:
         lines.append("No deterministic findings. "

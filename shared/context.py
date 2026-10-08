@@ -15,17 +15,18 @@ DEFAULTS = {
     "summaries": {},   # chapter number -> rolling plot summary
     "chronology": {},  # chapter number -> structured story state
     "final": {},       # chapter number -> edited body (no heading)
+    "unreviewed": set(),  # chapters finished without a readable review
     "output_path": "", # where the final book was actually written
 }
 
-context = dict(DEFAULTS)
+context = {}
 
 
 def reset_context():
     """Reset the context to its initial state (in place)."""
     context.clear()
     for key, value in DEFAULTS.items():
-        context[key] = value.copy() if isinstance(value, (dict, list)) else value
+        context[key] = value.copy() if isinstance(value, (dict, list, set)) else value
 
 
 def update_context(key, value):
@@ -38,3 +39,6 @@ def get_context(key=None):
     if key:
         return context.get(key)
     return context
+
+
+reset_context()  # fresh copies: never share DEFAULTS' mutable values

@@ -131,8 +131,9 @@ def test_review_chapter_raises_but_run_reviewer_forgives(tmp_path,
                         lambda p, **k: "not json at all")
     with pytest.raises(ValueError):
         reviewer.review_chapter(NUMBER, TITLE, "A draft.")
-    assert reviewer.run_reviewer(NUMBER, TITLE, "A draft.") == ("pass", [])
-    assert "Error reviewing chapter" in capsys.readouterr().out
+    assert reviewer.run_reviewer(NUMBER, TITLE, "A draft.") == \
+        (reviewer.UNREVIEWED, [])
+    assert "the chapter is NOT reviewed" in capsys.readouterr().out
 
 
 def test_an_outage_is_never_forgiven(tmp_path, monkeypatch):

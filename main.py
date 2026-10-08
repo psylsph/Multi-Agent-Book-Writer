@@ -341,6 +341,11 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None,
         print(f"Drafted: {len(context['drafts'])} | "
               f"Edited: {len(context['final'])}")
         print(f"Total time: {elapsed / 60:.1f} minutes")
+        unreviewed = sorted(context.get("unreviewed") or ())
+        if unreviewed:
+            print("Not reviewed (the reviewer's reply could not be read): "
+                  "chapters " + ", ".join(str(n) for n in unreviewed)
+                  + ". See interim/review_chapter_NN.md.")
         if incomplete:
             print("Chapters not finished: "
                   + ", ".join(str(n) for n in incomplete))

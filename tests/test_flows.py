@@ -8,6 +8,7 @@ import pytest
 
 import main as pipeline
 from agents import architect, editor, researcher
+from agents.reviewer import UNREVIEWED
 from shared import llm_client, output, runlog
 from shared.context import context, reset_context, update_context
 from shared.llm_client import EndpointUnavailable, load_config
@@ -260,6 +261,113 @@ def test_reviewer_findings_are_fixed_and_rereviewed(tmp_path, monkeypatch):
     assert "REVIEWER NOTES" in revise_prompts[0] and "wrong day" in revise_prompts[0]
     assert "fixed" in context["final"][1]
 
+
+
+TIMELINE_ISSUE = {"type": "timeline", "description": "wrong day",
+                  "fix": "Monday"}
+
+
+def _scripted_reviews(*replies):
+    calls = []
+    replies = iter(replies)
+
+    def review(n, title, text):
+        calls.append(text)
+        return next(replies)
+    return review, calls
+
+
+def test_a_length_expansion_is_rereviewed_even_after_a_pass(tmp_path,
+                                                            monkeypatch):
+    """New material can contradict the story, so a revision that grows the
+    chapter is reviewed again; here it did, and the short draft is kept."""
+    review, calls = _scripted_reviews(("pass", []),
+                                      ("revise", [TIMELINE_ISSUE]))
+
+    def prose(prompt, **kwargs):
+        if "You are revising" in prompt:
+            return _words(130, "grown")
+        return _echo_polish(prompt)
+
+    _editor(monkeypatch, tmp_path, {1: _words(50)}, prose, reviewer=review,
+            book="  extra_length_rounds: 0\n")
+    editor.run_editor()
+    assert len(calls) == 2 and "growna" in calls[1]
+    assert context["final"][1] == _words(50)        # contradiction rejected
+
+
+def test_a_small_lint_fix_is_not_rereviewed(tmp_path, monkeypatch):
+    review, calls = _scripted_reviews(("pass", []))
+
+    def prose(prompt, **kwargs):
+        if "You are revising" in prompt:
+            return _words(120)
+        return _echo_polish(prompt)
+
+    _editor(monkeypatch, tmp_path, {1: _words(120) + " ominous"}, prose,
+            reviewer=review)
+    update_context("bible", {**BIBLE, "constraints": ['Never "ominous".']})
+    editor.run_editor()
+    assert len(calls) == 1
+    assert "ominous" not in context["final"][1]
+
+
+def test_fixing_a_continuity_error_outweighs_two_banned_words(
+        tmp_path, monkeypatch):
+    """Two banned words (severity 1 each) are better than a timeline error
+    (severity 5): a plain count (1 -> 2) would have rejected this revision."""
+    review, _ = _scripted_reviews(("revise", [TIMELINE_ISSUE]), ("pass", []))
+
+    def prose(prompt, **kwargs):
+        if "You are revising" in prompt:
+            return _words(118) + " ominous foo"
+        return _echo_polish(prompt)
+
+    _editor(monkeypatch, tmp_path, {1: _words(120)}, prose, reviewer=review,
+            book="  revision_rounds: 1\n")
+    update_context("bible", {**BIBLE, "constraints": ['Never "ominous".',
+                                                    'Never "foo".']})
+    editor.run_editor()
+    assert context["final"][1].endswith("ominous foo")
+    diff = (tmp_path / "out" / "interim" / "diff_chapter_01.md").read_text()
+    assert "revision accepted" in diff and "severity 5 -> 2" in diff
+
+
+def test_an_unreadable_rereview_does_not_count_as_a_fix(tmp_path,
+                                                         monkeypatch, capsys):
+    review, _ = _scripted_reviews(("revise", [TIMELINE_ISSUE]),
+                                  (UNREVIEWED, []), (UNREVIEWED, []))
+
+    def prose(prompt, **kwargs):
+        if "You are revising" in prompt:
+            return _words(120, "beta")
+        return _echo_polish(prompt)
+
+    _editor(monkeypatch, tmp_path, {1: _words(120)}, prose, reviewer=review)
+    editor.run_editor()
+    diff = (tmp_path / "out" / "interim" / "diff_chapter_01.md").read_text()
+    assert "earlier issues assumed unfixed" in diff
+    assert context["unreviewed"] == {1}
+    assert "finished WITHOUT a readable review" in capsys.readouterr().out
+    report = (tmp_path / "out" / "interim" / "lint_report.md").read_text()
+    assert "## Not reviewed" in report
+
+
+def test_an_unreadable_first_review_is_reported(tmp_path, monkeypatch):
+    review, _ = _scripted_reviews((UNREVIEWED, []))
+    _editor(monkeypatch, tmp_path, {1: _words(120)},
+            lambda p, **k: _echo_polish(p), reviewer=review)
+    editor.run_editor()
+    assert context["unreviewed"] == {1}
+    diff = (tmp_path / "out" / "interim" / "diff_chapter_01.md").read_text()
+    assert "reviewer: unreviewed - the reply could not be read" in diff
+
+
+def test_severity_weighs_continuity_above_surface_findings():
+    assert editor.severity([{"check": "dead_character"}]) > \
+        editor.severity([{"check": "quota"}, {"check": "banned_word"}])
+    assert editor.severity([], [{"type": "made_up_type"}]) == \
+        editor.DEFAULT_SEVERITY
 
 def test_a_short_chapter_is_expanded_with_the_length_instructions(
         tmp_path, monkeypatch):

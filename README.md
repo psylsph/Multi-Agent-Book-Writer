@@ -448,6 +448,18 @@ continuity checks (deaths, who has met, timeline) there are:
   (your seed's rules a word-counter can't check: POV, tense, content and style).
   Findings feed the same bounded revise loop; for an outline gap the reviser
   adds the missing beat as a short passage.
+- **Judging a revision**: a revision (or polish) is kept only if it does not
+  make the chapter worse by *severity*, not by a raw count of findings. A
+  continuity error weighs 5, a missed outline beat, broken constraint or short
+  chapter 3, a name typo 2, a banned word, quota or repeated phrase 1. So a
+  revision that fixes a dead character walking about but trips two word quotas
+  is accepted. A revision that grows the chapter by more than 10% (a length
+  expansion, an added beat) is reviewed again even if the draft passed, because
+  new material can contradict the story.
+- **Unreadable reviews**: if the reviewer's reply can't be read, the chapter is
+  marked **not reviewed** rather than passed: `review_chapter_NN.md`, the
+  edit diff, `lint_report.md` and the end-of-run summary all say so. If a
+  revision's re-review can't be read, its earlier issues are assumed unfixed.
 - **Repetition lint** (`book.repetition_lint`): models reuse imagery and
   phrasing across chapters ("a shiver ran down her spine as..."). A phrase of six
   or more words already used twice in earlier chapters is reported and the

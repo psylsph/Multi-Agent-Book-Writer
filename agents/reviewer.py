@@ -23,6 +23,8 @@ from shared.story_state import (merge_states, render_story_facts,
                                 render_story_so_far)
 
 ALL_CHECKS = ("continuity", "outline", "constraints")
+# run_reviewer()'s verdict when the reply could not be read
+UNREVIEWED = "unreviewed"
 
 CONTINUITY_TYPES = ("dead_resurrection", "relationship_regression",
                     "relationship_leap", "knowledge", "timeline", "setting")
@@ -119,7 +121,7 @@ def review_chapter(number, title, draft):
     Returns (verdict, issues) where verdict is "pass" or "revise" and issues
     is a list of {type, description, fix} dicts. Raises when the model's
     answer cannot be read (and EndpointUnavailable when the server is down);
-    run_reviewer() turns the former into a pass so a bad reply never blocks a
+    run_reviewer() turns the former into UNREVIEWED so a bad reply never blocks a
     run, but an evaluation needs to tell the two apart.
     """
     bible = context.get("bible") or {}
@@ -164,13 +166,19 @@ def review_chapter(number, title, draft):
 
 
 def run_reviewer(number, title, draft):
-    """review_chapter(), but a reply that cannot be read counts as a pass: a
-    review failure must never block the pipeline. A server outage still
-    aborts (don't silently mark chapters reviewed while it is down)."""
+    """review_chapter(), but a reply that cannot be read never blocks the
+    pipeline: it returns (UNREVIEWED, []) so the caller can carry on AND say
+    that the chapter was not checked. A server outage still aborts (don't
+    silently mark chapters reviewed while it is down)."""
     try:
         return review_chapter(number, title, draft)
     except EndpointUnavailable:
         raise
     except Exception as e:
-        print(f"[REVIEWER] Error reviewing chapter {number}: {e}")
-        return "pass", []
+        print(f"[REVIEWER] Could not read the review of chapter {number} "
+              f"({e}); the chapter is NOT reviewed.")
+        save_interim(chapter_filename("review", number),
+                     f"# Review - Chapter {number}: {title}\n\n"
+                     f"**Verdict: NOT REVIEWED** - the reviewer's reply could "
+                     f"not be read ({e}).\n")
+        return UNREVIEWED, []

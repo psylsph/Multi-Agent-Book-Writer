@@ -122,7 +122,9 @@ def test_review_file_records_what_was_checked(tmp_path, monkeypatch):
 
 def test_garbage_review_never_blocks_the_pipeline(tmp_path, monkeypatch):
     (verdict, issues), _ = _review(tmp_path, monkeypatch, "not json at all")
-    assert (verdict, issues) == ("pass", [])
+    assert (verdict, issues) == (reviewer.UNREVIEWED, [])
+    review = (tmp_path / "out" / "interim" / "review_chapter_01.md").read_text()
+    assert "NOT REVIEWED" in review
 
 
 def test_endpoint_outage_is_not_swallowed(tmp_path, monkeypatch):
