@@ -26,6 +26,13 @@ def has_resume():
     return (resume_dir() / "bible.json").exists()
 
 
+def load_plan():
+    """The book size and clarifications the seed review settled (plan.json),
+    or None when there is none."""
+    path = resume_dir() / "plan.json"
+    return _read_json(path) if path.exists() else None
+
+
 def _read_json(path):
     try:
         return json.loads(path.read_text(encoding="utf-8"))

@@ -32,6 +32,7 @@ All agents share one context object; every LLM call goes through a single config
 ```
 multi-agent-book-writer/
 ├── main.py                 # CLI entry point & pipeline orchestrator
+├── make_epub.py            # finished chapters -> one EPUB (no LLM)
 ├── agents/
 │   ├── architect.py        # seed prompt -> story bible
 │   ├── planner.py          # chapter outline (JSON + seed-outline aware)
@@ -49,6 +50,7 @@ multi-agent-book-writer/
 │   ├── prompts.py          # every agent's system prompt (role + rules)
 │   ├── config_schema.py    # known config options; warns about typos
 │   ├── runlog.py           # copies console output to a log file
+│   ├── epub.py             # the EPUB builder behind make_epub.py
 │   └── output.py           # interim artifacts + bible formatting
 ├── seeds/
 │   ├── SEED_SCHEMA.md      # seed format reference
@@ -127,6 +129,8 @@ uv run main.py --demo 2   # same, but only the first 2 chapters
 | `--config FILE` | Config file to use (default `config.yaml`). |
 | `--model NAME` | Override `llm.model` for this run. |
 | `--out FILE` | Override the output filename (written under `output.directory`). |
+| `--plan-only` | Stop after the seed review, story bible and outline. Rerun without it to write the book; it continues from that plan. |
+| `--seed-review MODE` | Override `book.seed_review` for this run: `ask`, `warn` or `off`. See [Seed review](#seed-review). |
 | `--no-resume` | Ignore saved interim files and start over from the seed. See [Resume](#resume). |
 | `-h`, `--help` | Show the built-in help. |
 
@@ -179,13 +183,99 @@ more, the first N are used (with a notice).
 
 1. `--chapters N` / positional `N` if given
 2. the number of chapters in the seed's own outline
-3. the LLM's suggestion after reading the seed (`book.auto_chapters: true`,
-   clamped to `book.min_chapters`–`book.max_chapters`)
-4. `book.num_chapters` from config.yaml (default 5) — also the fallback if
+3. a total length stated in the seed ("approximately 50,000 words"), divided
+   by the chapter length
+4. the seed review's recommendation (see [Seed review](#seed-review))
+5. the LLM's suggestion after reading the seed (`book.auto_chapters: true`,
+   clamped to `book.min_chapters`–`book.max_chapters`), used only when the
+   seed review is off or fails
+6. `book.num_chapters` from config.yaml (default 5) — also the fallback if
    `auto_chapters` is off or the suggestion call fails
+
+With the seed review on (`ask`, the default) you see 1–3 checked against the
+seed's material and can choose a different size before anything is written.
 
 When resuming, the saved outline is reused so chapter numbers keep matching
 the drafts on disk.
+
+## Seed review
+
+Before the story bible is built, the seed review checks that the seed holds
+enough story for the length asked of it. A seed covering one weekend with a
+handful of scenes can't fill 50,000 words without padding, however the chapters
+are divided.
+
+1. The model lists every scene the seed supplies, each with a short quote. Code
+   checks each quote really is in the seed; scenes it can't find are shown but
+   not counted. It also reports the story's timespan, its subplots, the length
+   the material would naturally fill, and a verdict on the requested size:
+   *too long* (it would need padding), *about right* or *too short* (it would
+   be rushed).
+2. Code, not the model, does the arithmetic: words per scene at the requested
+   size (a scene usually runs 1,000–3,000 words) and whether there are more
+   chapters than scenes.
+3. On a terminal it asks up to `book.seed_questions` questions about gaps that
+   would change the book: a missing subplot, the ending, point of view. Press
+   Enter to accept the assumption shown, or type `skip` to accept all the rest.
+   If you answered any, the size is checked again with your answers.
+4. If the size doesn't fit, it asks which to use:
+
+   ```
+   [k] keep the requested 25 chapters x 2,000 words (about 50,000)  (Enter)
+   [r] use the recommended 10 chapters x 2,000 words (about 20,000)
+   [c] choose your own
+   [s] stop here: nothing is written, so you can edit the seed and rerun
+   ```
+
+Your answers become part of the story bible, so every later stage sees them. The
+review, scene list and answers are saved to `output/interim/seed_review.md`;
+copy the answers into your seed if you want them for a fresh run. The chosen
+size is saved in `output/interim/plan.json`, so a resumed run keeps it. The
+planner now also reads the seed itself, not just the bible's summary, and is told
+to give each chapter its own material rather than spreading one scene across
+several.
+
+`book.seed_review` sets the mode: `ask` (the default), `warn` (print the review
+and carry on with the requested size, never prompting; also what `ask` does
+without a terminal) or `off`. `--plan-only` stops after the outline so you can
+read the plan cheaply, then rerun without it to write the book.
+
+## Making an EPUB
+
+Once the chapters are finished, `make_epub.py` turns them into one EPUB 3 book.
+It needs no LLM and no extra packages, and sends nothing anywhere.
+
+```bash
+uv run python make_epub.py --author "Your Name"            # output/chapters -> output/<title>.epub
+uv run python make_epub.py --author "Your Name" --cover cover.jpg
+uv run python make_epub.py output/draft.md -o my-book.epub  # from one assembled file instead
+```
+
+It reads `<output.directory>/chapters/chapter_NN.md` (the edited chapters once a
+run has finished) or a single book file such as `draft.md`, takes the title from
+the book's own files (override with `--title`), and writes the EPUB next to the
+`chapters/` directory unless you pass `-o`.
+
+What it does to the book:
+
+- A cover (a generated typographic one, or your own image with `--cover`), a title
+  page, a contents page, and a navigable table of contents.
+- Typography: curly quotes and apostrophes, real ellipses and em dashes, small caps
+  on each chapter's opening line, indented paragraphs, justified text. Pass
+  `--plain-quotes` to leave the text exactly as written.
+- Chapter headings read "CHAPTER ONE" over the title. Planning notes the pipeline
+  leaves in headings, such as `(Stuart POV, heat 3)`, are dropped from the
+  displayed titles (`--keep-annotations` keeps them). `--numbers digits|none`
+  changes the "Chapter One" label.
+- Markdown emphasis (`*italic*`, `**bold**`) becomes real italics and bold, and a
+  line of `***` or `---` becomes a scene-break ornament.
+- `--language` (default `en-GB`) sets the language for hyphenation and reading apps.
+
+The files validate cleanly with the W3C's EPUBCheck. Reading apps differ: the
+generated cover is an SVG, which Kindle and some other apps handle poorly, so
+supply a JPEG or PNG with `--cover` if the cover matters. To send a book to a Kindle,
+use Amazon's Send to Kindle, which accepts EPUB. Review the whole book once before
+publishing it; the pipeline's checks reduce errors but cannot remove them.
 
 ## Resume
 

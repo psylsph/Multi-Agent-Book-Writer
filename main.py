@@ -2,7 +2,8 @@
 Main Pipeline
 Orchestrates the multi-agent book writing workflow:
 
-    seed prompt -> architect (story bible) -> planner (outline)
+    seed prompt -> seed review (size check, questions) -> architect (story bible)
+                 -> planner (outline)
                  -> researcher (lore briefs) -> writer (drafts + summaries)
                  -> editor (polish + consistency) -> output
 """
@@ -14,7 +15,8 @@ import time
 from pathlib import Path
 
 from agents.architect import run_architect
-from agents.planner import run_planner
+from agents.planner import extract_seed_outline, run_planner
+from agents.seed_review import run_seed_review
 from agents.researcher import run_researcher
 from agents.writer import refresh_state, run_writer
 from agents.editor import finalize_book, run_editor, save_book
@@ -24,7 +26,8 @@ from shared.llm_client import EndpointUnavailable, get_config, load_config, \
     preflight
 from shared.output import (archive_previous_run, interim_dir,
                            interim_enabled, save_interim, save_interim_json)
-from shared.resume import has_resume, load_state, summarize_for_log
+from shared.resume import has_resume, load_plan, load_state, \
+    summarize_for_log
 
 EXAMPLE_SEED = Path(__file__).resolve().parent / "seeds" / "example_seed.md"
 
@@ -118,6 +121,18 @@ def agent_enabled(name):
         "enabled", True)
 
 
+def apply_plan(plan):
+    """Use the book size settled by the seed review (saved in plan.json, so a
+    resumed run keeps it). Returns the chapter count to plan, or None."""
+    if not plan:
+        return None
+    wpc = plan.get("words_per_chapter")
+    if isinstance(wpc, int) and wpc > 0:
+        get_config()["book"]["words_per_chapter"] = wpc
+    chapters = plan.get("chapters")
+    return chapters if isinstance(chapters, int) and chapters > 0 else None
+
+
 def _hydrate_resume(state):
     """Push loaded resume state into the shared context."""
     if state["bible"]:
@@ -208,7 +223,8 @@ def _incomplete_chapters(context, editor_on):
             if c["number"] not in done]
 
 
-def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None):
+def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None,
+                 plan_only=False):
     """
     Execute the complete book writing pipeline.
 
@@ -217,6 +233,7 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None):
         num_chapters: explicit chapter count override (None = seed/config)
         resuming: continue from the interim files instead of starting over
         state: already-loaded resume state (loaded here when omitted)
+        plan_only: stop after the outline (seed review, bible, plan)
     """
     print("=" * 60)
     print("MULTI-AGENT BOOK WRITER")
@@ -242,6 +259,26 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None):
             print(f"[PIPELINE] Interim artifacts: {interim_dir()}/")
 
     try:
+        # Step 0: Can the seed carry the requested length? (questions, size)
+        clarifications = []
+        if resuming:
+            planned = apply_plan(load_plan())
+            num_chapters = num_chapters or planned
+        else:
+            print("\n[PIPELINE] Step 0: Seed review (length and gaps)")
+            print("-" * 60)
+            with _phase(phases, "seed review"):
+                plan = run_seed_review(
+                    seed_text, num_chapters,
+                    len(extract_seed_outline(seed_text)))
+            if plan["stop"]:
+                print("\n[PIPELINE] Stopped at the seed review; nothing was "
+                      "written. Edit the seed (see output/interim/"
+                      "seed_review.md) and rerun.")
+                return 0
+            clarifications = plan["clarifications"]
+            num_chapters = apply_plan(plan) or num_chapters
+
         # Step 1: Story bible from the seed prompt
         print("\n[PIPELINE] Step 1: Architect (story bible)")
         print("-" * 60)
@@ -250,7 +287,7 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None):
                   "skipping.")
         else:
             with _phase(phases, "architect"):
-                run_architect(seed_text)
+                run_architect(seed_text, clarifications)
 
         # Step 2: Chapter outline (honors the seed's own outline)
         print("\n[PIPELINE] Step 2: Planner (chapter outline)")
@@ -260,6 +297,11 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None):
         if not chapters:
             print("[PIPELINE] Planning failed. Exiting.")
             return 1
+        if plan_only:
+            print("\n[PIPELINE] Plan only: stopping after the outline "
+                  "(output/interim/outline.md). Rerun without --plan-only to "
+                  "write the book; it continues from this plan.")
+            return 0
 
         # Step 3: Lore briefs per chapter
         if agent_enabled("researcher"):
@@ -360,6 +402,13 @@ def main():
     parser.add_argument("--out", dest="out_file",
                         help="override the output filename "
                              "(written under the configured output dir)")
+    parser.add_argument("--plan-only", action="store_true",
+                        help="stop after the seed review, story bible and "
+                             "outline; rerun without it to write the book")
+    parser.add_argument("--seed-review", choices=("ask", "warn", "off"),
+                        help="override book.seed_review: ask questions and "
+                             "choose the size (ask), only report (warn), or "
+                             "skip the check (off)")
     parser.add_argument("--no-resume", action="store_true",
                         help="ignore any prior interim artifacts and restart "
                              "from the seed prompt")
@@ -376,6 +425,8 @@ def main():
         cfg["llm"]["model"] = args.model
     if args.out_file:
         cfg["output"]["filename"] = args.out_file
+    if args.seed_review:
+        cfg["book"]["seed_review"] = args.seed_review
 
     if cfg["output"].get("log", True):
         log_path = runlog.start_log(Path(cfg["output"]["directory"]) / "logs")
@@ -406,10 +457,10 @@ def _run(args, cfg, num_chapters):
         web_search.offer_docker_setup()
 
     exit_code = run_pipeline(seed_text, num_chapters=num_chapters,
-                             resuming=resuming, state=state)
-    if exit_code == 0:
-        out = get_context("output_path") or \
-            Path(cfg["output"]["directory"]) / cfg["output"]["filename"]
+                             resuming=resuming, state=state,
+                             plan_only=args.plan_only)
+    if exit_code == 0 and get_context("output_path"):
+        out = get_context("output_path")
         print(f"\n\u2713 Book written! Check {out}")
     sys.exit(exit_code or 0)
 

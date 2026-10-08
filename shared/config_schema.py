@@ -15,7 +15,7 @@ KNOWN_KEYS = {
         "words_per_chapter", "word_count_tolerance", "revision_rounds",
         "extra_length_rounds", "review_as_you_go", "review_checks",
         "repetition_lint", "name_lint_ignore", "summary_window",
-        "extraction_checks",
+        "extraction_checks", "seed_review", "seed_questions",
     },
     "llm": {
         "base_url", "model", "api_key", "timeout", "retries",

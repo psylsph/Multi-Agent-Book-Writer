@@ -178,7 +178,9 @@ def test_a_fresh_pipeline_run_archives_before_it_starts(tmp_path, monkeypatch):
     import main as pipeline
     out = _use_config(tmp_path)
     _populate(out)
-    monkeypatch.setattr(pipeline, "run_architect", lambda seed: None)
+    monkeypatch.setattr(pipeline, "run_seed_review", lambda *a, **k: {"chapters": None, "words_per_chapter": 100,
+                                    "clarifications": [], "stop": False})
+    monkeypatch.setattr(pipeline, "run_architect", lambda *a: None)
     monkeypatch.setattr(pipeline, "run_planner", lambda **k: [])   # stops early
     assert pipeline.run_pipeline("A seed.", resuming=False) == 1
     (archive,) = list((out / "archive").iterdir())

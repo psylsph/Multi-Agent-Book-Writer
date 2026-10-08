@@ -62,8 +62,9 @@ def test_a_fresh_run_writes_the_whole_book(tmp_path, monkeypatch, capsys):
             "review_chapter_01.md", "diff_chapter_01.md",
             "run_stats.md", "run_stats.json"} <= interim
     # the seed carries an outline, so nothing was asked of the planner
-    assert fake.kinds == {"architect": 1, "researcher": 2, "writer": 2,
-                          "extractor": 2, "reviewer": 2, "polisher": 2}
+    assert fake.kinds == {"seed_review": 1, "architect": 1, "researcher": 2,
+                          "writer": 2, "extractor": 2, "reviewer": 2,
+                          "polisher": 2}
     assert "PIPELINE COMPLETE" in capsys.readouterr().out
 
 
@@ -94,10 +95,35 @@ def test_unknown_config_keys_are_warned_about(tmp_path, monkeypatch, capsys):
 def test_chapter_count_is_suggested_when_the_seed_has_no_outline(
         tmp_path, monkeypatch):
     fake = FakeLLM().install(monkeypatch)
-    cfg = write_config(tmp_path, book="  min_chapters: 1\n")
+    cfg = write_config(tmp_path, book="  min_chapters: 1\n  seed_review: off\n")
     assert run(monkeypatch, cfg, seed="# Story\n\nA premise only.") == 0
     assert fake.kinds["suggest"] == 1 and fake.kinds["planner"] == 1
     assert fake.kinds["writer"] == 2
+    assert "seed_review" not in fake.kinds
+
+
+def test_the_seed_review_sizes_a_book_without_an_outline(tmp_path,
+                                                         monkeypatch):
+    fake = FakeLLM().install(monkeypatch)
+    cfg = write_config(tmp_path, book="  min_chapters: 1\n")
+    assert run(monkeypatch, cfg, seed="# Story\n\nA premise only.") == 0
+    assert fake.kinds["seed_review"] == 1 and "suggest" not in fake.kinds
+    assert fake.kinds["writer"] == 2             # its recommendation: 2
+    plan = json.loads((out(tmp_path) / "interim" / "plan.json").read_text())
+    assert plan["chapters"] == 2 and plan["words_per_chapter"] == 100
+
+
+def test_plan_only_stops_after_the_outline_and_a_rerun_continues(
+        tmp_path, monkeypatch, capsys):
+    fake = FakeLLM().install(monkeypatch)
+    cfg = write_config(tmp_path)
+    assert run(monkeypatch, cfg, "--plan-only") == 0
+    assert "writer" not in fake.kinds
+    assert (out(tmp_path) / "interim" / "outline.md").exists()
+    assert "Book written" not in capsys.readouterr().out
+    assert run(monkeypatch, cfg) == 0
+    assert fake.kinds["seed_review"] == 1        # not asked again on resume
+    assert fake.kinds["architect"] == 1 and fake.kinds["writer"] == 2
 
 
 def test_the_demo_seed_runs(tmp_path, monkeypatch):
@@ -192,7 +218,8 @@ def test_run_statistics_are_printed_and_saved(tmp_path, monkeypatch, capsys):
     assert data["total"]["prompt_tokens"] > 0
     assert set(data["agents"]) >= {"writer", "reviewer", "editor", "extractor"}
     assert [p["phase"] for p in data["phases"]] == [
-        "architect", "planner", "researcher", "writer", "editor"]
+        "seed review", "architect", "planner", "researcher", "writer",
+        "editor"]
     shown = capsys.readouterr().out
     assert "# Run statistics" in shown and "| writer | 2 |" in shown
     assert "unreported" not in (out(tmp_path) / "interim" /
@@ -238,7 +265,7 @@ def test_json_mode_is_requested_only_for_object_replies(tmp_path, monkeypatch):
         by_kind.setdefault(c["kind"], set()).add(
             "response_format" in c["payload"])
     assert by_kind["architect"] == by_kind["extractor"] == {True}
-    assert by_kind["reviewer"] == by_kind["suggest"] == {True}
+    assert by_kind["reviewer"] == by_kind["seed_review"] == {True}
     assert by_kind["writer"] == by_kind["planner"] == {False}  # arrays/prose
 
 

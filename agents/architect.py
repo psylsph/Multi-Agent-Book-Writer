@@ -72,7 +72,7 @@ def _normalize(bible, seed_text):
     }
 
 
-def run_architect(seed_text):
+def run_architect(seed_text, clarifications=()):
     """
     Build a story bible from the seed prompt.
 
@@ -80,6 +80,12 @@ def run_architect(seed_text):
     built straight from the seed text so the pipeline never dead-ends.
     """
     print("[ARCHITECT] Building story bible from seed prompt...")
+    answers = ""
+    if clarifications:
+        answers = ("\nThe author has also settled these questions about the "
+                   "seed; build them into the bible:\n"
+                   + "\n".join(f"- {c['question']} {c['answer']}"
+                                for c in clarifications) + "\n")
 
     prompt = f"""You are a story architect. Convert the creative seed below into a JSON story bible.
 
@@ -98,6 +104,7 @@ Return ONLY valid JSON (no markdown fences, no commentary) with exactly these ke
 Extract faithfully from the seed - do not invent major new characters or change names.
 If the seed lacks a section, fill it in minimally and sensibly.
 
+{answers}
 Creative seed:
 \"\"\"{seed_text}\"\"\"
 """
@@ -138,6 +145,10 @@ Creative seed:
               f"from the seed" + (f", {len(extras)} from the LLM" if extras else ""))
 
     bible["seed"] = seed_text
+    if clarifications:
+        bible["clarifications"] = [
+            {"question": c["question"], "answer": c["answer"],
+             "answered": bool(c.get("answered"))} for c in clarifications]
     update_context("bible", bible)
     update_context("title", bible["title"])
     update_context("seed", seed_text)

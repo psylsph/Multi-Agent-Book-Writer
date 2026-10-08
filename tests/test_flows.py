@@ -478,7 +478,9 @@ def test_hydrating_resume_state_fills_the_context(tmp_path):
 
 
 def _stub_pipeline(monkeypatch, **replace):
-    stubs = dict(run_architect=lambda seed: None,
+    stubs = dict(run_seed_review=lambda *a, **k: {"chapters": None, "words_per_chapter": 100,
+                                    "clarifications": [], "stop": False},
+                 run_architect=lambda *a: None,
                  run_planner=lambda **k: update_context(
                      "chapters", CHAPTERS) or CHAPTERS,
                  run_researcher=lambda: None, run_writer=lambda **k: None,
@@ -506,7 +508,7 @@ def test_with_the_editor_disabled_the_raw_drafts_are_saved(tmp_path,
 def test_ctrl_c_exits_130_with_a_resume_hint(tmp_path, monkeypatch, capsys):
     _config(tmp_path)
 
-    def interrupted(seed):
+    def interrupted(seed, *a):
         raise KeyboardInterrupt
 
     _stub_pipeline(monkeypatch, run_architect=interrupted)
@@ -518,7 +520,7 @@ def test_unexpected_errors_are_reported_then_raised(tmp_path, monkeypatch,
                                                     capsys):
     _config(tmp_path)
 
-    def broken(seed):
+    def broken(seed, *a):
         raise ValueError("kaboom")
 
     _stub_pipeline(monkeypatch, run_architect=broken)

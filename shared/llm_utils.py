@@ -285,4 +285,10 @@ def render_bible(bible):
                      + "\n".join(f"- {c}" for c in constraints))
     if bible.get("notes"):
         parts.append(f"Author notes:\n{bible['notes']}")
+    clarifications = [c for c in bible.get("clarifications") or []
+                      if isinstance(c, dict) and c.get("answer")]
+    if clarifications:
+        parts.append("Author's clarifications (part of the brief):\n"
+                     + "\n".join(f"- {c.get('question', '')} {c['answer']}"
+                                  for c in clarifications))
     return "\n\n".join(parts) if parts else "(no story bible available)"

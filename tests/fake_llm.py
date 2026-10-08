@@ -86,6 +86,7 @@ class FakeLLM:
     # ------------------------------------------------------------- dispatch
     def kind(self, prompt):
         for phrase, kind in (
+                ("Assess this creative brief", "seed_review"),
                 ("Decide how many chapters", "suggest"),
                 ("You are a story architect", "architect"),
                 ("planning the chapter outline", "planner"),
@@ -100,6 +101,18 @@ class FakeLLM:
         return "other"
 
     def reply(self, kind, prompt):
+        if kind == "seed_review":
+            return json.dumps({
+                "stated": {"total_words": None, "quote": ""},
+                "timespan": "two days",
+                "scenes": [{"what": "Aria finds the letter",
+                            "quote": "Aria finds the hidden letter"},
+                           {"what": "Tom ferries her",
+                            "quote": "Tom takes her across the marsh"}],
+                "threads": [], "natural_words": {"low": 150, "high": 300},
+                "verdict": "about_right", "reasons": ["fits"],
+                "recommended": {"chapters": 2, "words_per_chapter": 100},
+                "to_fill_requested": [], "questions": []})
         if kind == "suggest":
             return json.dumps({"chapters": 2, "reason": "short"})
         if kind == "architect":

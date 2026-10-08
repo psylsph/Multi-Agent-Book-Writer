@@ -320,14 +320,17 @@ def _read_stream(response, agent):
             if chunk.get("usage"):
                 usage = chunk["usage"]
             choice = (chunk.get("choices") or [{}])[0]
-            piece = (choice.get("delta") or {}).get("content")
+            delta = choice.get("delta") or {}
+            piece = delta.get("content")
             if piece:
                 parts.append(piece)
                 chunks += 1
+            elif delta.get("reasoning_content") or delta.get("reasoning"):
+                chunks += 1         # thinking tokens: progress, but not output
             if choice.get("finish_reason"):
                 finish = choice["finish_reason"]
             now = time.time()
-            if now - last_print >= PROGRESS_SECONDS:
+            if now - last_print >= PROGRESS_SECONDS and chunks:
                 print(f"[LLM] {agent}: ~{chunks} tokens so far "
                       f"({chunks / max(now - started, 1e-9):.0f} tok/s)")
                 last_print = now

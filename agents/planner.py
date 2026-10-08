@@ -191,6 +191,14 @@ def _plan_with_llm(bible, target, fixed_prefix=None):
               "story naturally, up to the story's conclusion.\n\n"
         )
 
+    seed = str(bible.get("seed") or context.get("seed") or "")
+    seed_block = (f"THE AUTHOR'S BRIEF (the story material to distribute across "
+                  f"the chapters):\n\"\"\"{seed[:16000]}\"\"\"\n\n"
+                  if seed else "")
+    answers = [c for c in bible.get("clarifications") or [] if c.get("answer")]
+    answers_block = ("AUTHOR'S CLARIFICATIONS:\n" + "\n".join(
+        f"- {c.get('question', '')} {c['answer']}" for c in answers) + "\n\n"
+        if answers else "")
     prompt = f"""You are planning the chapter outline of a novel.
 
 TITLE: {bible.get('title', '')}
@@ -202,10 +210,11 @@ CHARACTERS:
 WORLD:
 {bible.get('world', '')}
 
-{fixed_block}Return ONLY a JSON array of exactly {target} objects, one per chapter in story order:
+{seed_block}{answers_block}{fixed_block}Return ONLY a JSON array of exactly {target} objects, one per chapter in story order:
 [{{"number": 1, "title": "short evocative title", "summary": "1-2 sentences: what happens and how the arc advances"}}]
 
 The chapters must form a complete dramatic arc (setup, rising action, climax, resolution).
+Give every chapter its own distinct story material from the brief; do not split one scene across chapters to fill the count, and do not repeat a beat.
 No markdown fences, no commentary - JSON only."""
 
     raw = generate_with_wait(prompt, system=prompts.PLANNER,

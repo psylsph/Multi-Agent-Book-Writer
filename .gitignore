@@ -44,6 +44,7 @@ venv.bak/
 # Project specific
 output/
 logs/
+*.epub
 *.log
 .env
 
@@ -52,6 +53,7 @@ seed.md
 Modelfile
 uk.lock
 .coverage
+output*
 
 # Test coverage artifacts
 .coverage

@@ -78,6 +78,20 @@ def test_stream_prints_progress(tmp_path, monkeypatch, capsys):
     assert "[LLM] writer: ~" in capsys.readouterr().out
 
 
+def test_stream_counts_thinking_and_stays_quiet_when_nothing_arrived(
+        tmp_path, monkeypatch, capsys):
+    _config(tmp_path, "  stream: true\n")
+    monkeypatch.setattr(llm_client, "PROGRESS_SECONDS", 0)
+    thinking = 'data: {"choices": [{"delta": {"reasoning_content": "hmm"}}]}'
+    post_returns(monkeypatch, FakeResponse(lines=[
+        'data: {"choices": [{"delta": {"role": "assistant"}}]}',   # no tokens yet
+        thinking, thinking, chunk("Done."), finish()]))
+    generate("hi", agent="architect")
+    out = capsys.readouterr().out
+    assert "~0 tokens" not in out
+    assert "architect: ~2 tokens so far" in out
+
+
 def test_a_stream_that_dies_mid_reply_is_an_outage(tmp_path, monkeypatch):
     _config(tmp_path, "  stream: true\n")
 

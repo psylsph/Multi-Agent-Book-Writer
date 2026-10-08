@@ -16,6 +16,17 @@ book:
   max_chapters: 30
   num_chapters: 5         # fallback if auto_chapters is false or the call fails
 
+  # Before anything is written, check that the seed holds enough story for the
+  # book's length (scenes it supplies, story timespan, words per scene), ask a
+  # few questions about gaps, and push back on a size the material can't fill.
+  #   ask  - show the review, ask the questions, let you keep the requested
+  #          size, take the recommended one, choose your own, or stop to edit
+  #          the seed (default; behaves like warn without a terminal)
+  #   warn - show the review and carry on with the requested size
+  #   off  - skip it (the planner sizes the book as before)
+  seed_review: ask
+  seed_questions: 5       # most questions to ask (0 = none)
+
   # Target length per chapter. The writer is asked for between
   # words_per_chapter * word_count_tolerance and words_per_chapter * 1.2.
   words_per_chapter: 2000

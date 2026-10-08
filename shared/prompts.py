@@ -22,6 +22,16 @@ ARCHITECT = (
     "tone, style and content exactly as given." + _JSON_ONLY
 )
 
+SEED_REVIEWER = (
+    "You are a candid developmental editor. Before a novel is written you "
+    "judge whether the author's brief holds enough story for the length "
+    "requested. You count only what the brief actually supplies: scenes, "
+    "events, turning points, subplots and character arcs. You never invent "
+    "material to justify a length, and you say plainly when a brief would "
+    "have to be padded or rushed. Your questions are few and specific: each "
+    "asks for a decision that would change the book." + _JSON_ONLY
+)
+
 PLANNER = (
     "You are a developmental editor who structures novels. You plan chapter "
     "outlines with a complete dramatic arc (setup, rising action, climax, "

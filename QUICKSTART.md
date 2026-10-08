@@ -79,6 +79,7 @@ the Planner generates an outline if you don't provide one.
 - **Your seed**: `uv run main.py --seed story.md`
 - **Inline premise**: `uv run main.py --prompt "A noir thriller set on Mars..."`
 - **Chapter count**: `uv run main.py --seed story.md -c 3`
+- **Check the plan first**: `uv run main.py --seed story.md --plan-only`
 - **Different model**: `uv run main.py --model llama3`
 - **Custom output name**: `uv run main.py --out my_book.md`
 - **View output**: `cat output/draft.md`
@@ -97,6 +98,8 @@ the Planner generates an outline if you don't provide one.
 | `--config FILE` | config file (default `config.yaml`) |
 | `--model NAME` | override `llm.model` |
 | `--out FILE` | override the output filename |
+| `--plan-only` | stop after the seed review and outline; rerun without it to write |
+| `--seed-review MODE` | `ask` (default), `warn` or `off` |
 | `--no-resume` | start over (the old run is archived to `output/archive/`, not deleted) |
 
 ## Resuming
@@ -110,6 +113,27 @@ from the last saved chapter (progress lives in `output/interim/`).
 - Run with a *different* seed or `-c` than the saved run: refused, so you
   can't accidentally reuse another book's chapters. Add `--no-resume` to
   start the new book.
+
+## Before writing: the seed review
+
+The first thing a run does is check that your seed has enough story for the
+length you asked for. On a terminal it asks a few questions about gaps (Enter
+accepts the assumption shown) and, if the size doesn't fit, lets you keep it,
+take the recommended size, choose your own, or stop and edit the seed. Use
+`--plan-only` to stop after the outline and read `output/interim/outline.md`
+before committing to the full run.
+
+## Making an EPUB
+
+When the chapters are done, build a single ebook (no LLM needed):
+
+```bash
+uv run python make_epub.py --author "Your Name"
+```
+
+This reads `output/chapters/` and writes `output/<title>.epub` with a cover,
+contents page and tidied typography. Add `--cover cover.jpg` for your own cover;
+`make_epub.py --help` lists the rest.
 
 ## Optional: web fact-checking
 

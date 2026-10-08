@@ -179,4 +179,12 @@ def format_bible_markdown(bible):
 
     if bible.get("notes"):
         lines += ["## Author Notes", "", bible["notes"], ""]
+
+    clarifications = bible.get("clarifications") or []
+    if clarifications:
+        lines += ["## Clarifications", ""]
+        lines += [f"- **{c.get('question', '')}** {c.get('answer', '')}"
+                  + ("" if c.get("answered") else " *(assumed)*")
+                  for c in clarifications]
+        lines.append("")
     return "\n".join(lines)
