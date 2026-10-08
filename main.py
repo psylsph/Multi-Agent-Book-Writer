@@ -22,8 +22,8 @@ from agents.writer import refresh_state, run_writer
 from agents.editor import finalize_book, run_editor, save_book
 from shared import llm_client, runlog, web_search
 from shared.context import get_context, reset_context, update_context
-from shared.llm_client import EndpointUnavailable, get_config, load_config, \
-    preflight
+from shared.llm_client import EndpointUnavailable, agent_enabled, \
+    get_config, load_config, preflight
 from shared.output import (archive_previous_run, interim_dir,
                            interim_enabled, save_interim, save_interim_json)
 from shared.resume import has_resume, load_plan, load_state, \
@@ -115,12 +115,6 @@ def _research_complete(state):
     return all(state["research"].get(c["number"]) for c in state["chapters"])
 
 
-def agent_enabled(name):
-    """Check the enabled flag for an agent in config.yaml (default True)."""
-    return ((get_config().get("agents") or {}).get(name) or {}).get(
-        "enabled", True)
-
-
 def apply_plan(plan):
     """Use the book size settled by the seed review (saved in plan.json, so a
     resumed run keeps it). Returns the chapter count to plan, or None."""
@@ -181,7 +175,7 @@ def _report_stats(phases):
 def review_as_you_go():
     """True when chapters are reviewed one at a time as they are written
     (book.review_as_you_go). Needs the editor; ignored when it is disabled."""
-    wanted = bool(get_config()["book"].get("review_as_you_go", False))
+    wanted = bool(get_config()["book"]["review_as_you_go"])
     if wanted and not agent_enabled("editor"):
         print("[PIPELINE] book.review_as_you_go needs the editor, which is "
               "disabled; writing all chapters first instead.")
@@ -428,7 +422,7 @@ def main():
     if args.seed_review:
         cfg["book"]["seed_review"] = args.seed_review
 
-    if cfg["output"].get("log", True):
+    if cfg["output"]["log"]:
         log_path = runlog.start_log(Path(cfg["output"]["directory"]) / "logs")
         if log_path:
             print(f"[PIPELINE] Logging to {log_path}")

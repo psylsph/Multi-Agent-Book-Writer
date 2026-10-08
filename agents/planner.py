@@ -267,9 +267,9 @@ def suggest_chapter_count(seed_text, bible):
     """
     book = get_config()["book"]
     fallback = int(book["num_chapters"])
-    lo = int(book.get("min_chapters", 3))
-    hi = max(lo, int(book.get("max_chapters", 30)))
-    words = int(book.get("words_per_chapter", 800))
+    lo = int(book["min_chapters"])
+    hi = max(lo, int(book["max_chapters"]))
+    words = int(book["words_per_chapter"])
 
     prompt = f"""You are planning the structure of a novel from the creative seed below.
 Decide how many chapters the book should have.
@@ -342,7 +342,7 @@ def run_planner(num_chapters=None):
     if target is None:
         if seed_outline:
             target = len(seed_outline)
-        elif cfg["book"].get("auto_chapters", True):
+        elif cfg["book"]["auto_chapters"]:
             target = suggest_chapter_count(context.get("seed", ""), bible)
         else:
             target = cfg["book"]["num_chapters"]

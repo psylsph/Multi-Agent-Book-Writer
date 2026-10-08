@@ -99,3 +99,24 @@ def test_the_shipped_configs_only_use_known_options():
 def test_the_example_lists_every_agent():
     agents = yaml.safe_load(EXAMPLE.read_text())["agents"]
     assert set(agents) == set(config_schema.AGENTS)
+
+
+def test_every_default_is_a_known_option():
+    for section, defaults in config_schema.DEFAULTS.items():
+        assert set(defaults) <= config_schema.KNOWN_KEYS[section], section
+
+
+def test_an_empty_config_gets_every_default(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("")
+    cfg = load_config(path)
+    for section, defaults in config_schema.DEFAULTS.items():
+        for key, value in defaults.items():
+            assert cfg[section][key] == value, f"{section}.{key}"
+
+
+def test_mutable_defaults_are_not_shared(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("")
+    load_config(path)["book"]["name_lint_ignore"].append("Zed")
+    assert config_schema.DEFAULTS["book"]["name_lint_ignore"] == []

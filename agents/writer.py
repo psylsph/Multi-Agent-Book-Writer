@@ -213,7 +213,7 @@ def _check_state(number, text, state, canon, aliases):
          the model's own decision alone.
     A chapter with no death language and no claimed death costs no extra call.
     """
-    if not get_config()["book"].get("extraction_checks", True):
+    if not get_config()["book"]["extraction_checks"]:
         return state
     variants = {n: extraction_checks.name_variants(n, aliases.get(n, ()))
                 for n in canon}
@@ -395,8 +395,8 @@ def run_writer(only=None):
     if only is None:
         print("[WRITER] Starting writing phase...")
     cfg = get_config()
-    words = int(cfg["book"].get("words_per_chapter", 800))
-    tolerance = float(cfg["book"].get("word_count_tolerance", 0.8))
+    words = int(cfg["book"]["words_per_chapter"])
+    tolerance = float(cfg["book"]["word_count_tolerance"])
     min_words, max_words = int(words * tolerance), int(words * 1.2)
 
     chapters = context.get("chapters", [])
@@ -408,7 +408,7 @@ def run_writer(only=None):
         print("[WRITER] No chapters found in context. Skipping writing.")
         return
 
-    window = int(cfg["book"].get("summary_window", 8))
+    window = int(cfg["book"]["summary_window"])
     # The bible rides in the system message: identical for every chapter, so
     # servers with prompt caching reuse it instead of re-reading it each time.
     system = prompts.with_bible(prompts.WRITER, bible)

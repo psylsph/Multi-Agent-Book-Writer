@@ -30,6 +30,65 @@ KNOWN_KEYS = {
     },
 }
 
+# The value every option takes when config.yaml leaves it out. load_config()
+# applies these, so code reads cfg["book"]["words_per_chapter"] directly and a
+# default lives in exactly one place. None means "unset": the feature is off
+# or the server decides (e.g. no max_tokens is sent).
+DEFAULTS = {
+    "book": {
+        "auto_chapters": True,
+        "min_chapters": 3,
+        "max_chapters": 30,
+        "num_chapters": 5,
+        "words_per_chapter": 800,
+        "word_count_tolerance": 0.8,
+        "revision_rounds": 2,
+        "extra_length_rounds": 2,
+        "review_as_you_go": False,
+        "review_checks": None,          # None = every check
+        "repetition_lint": True,
+        "name_lint_ignore": [],
+        "summary_window": 8,
+        "extraction_checks": True,
+        "seed_review": "ask",
+        "seed_questions": 5,
+    },
+    "llm": {
+        "base_url": "http://localhost:11434",
+        "api_key": "",
+        "model": "mistral",
+        "timeout": 300,
+        "retries": 2,
+        "endpoint_wait": 300,           # s to wait for a downed server
+        "max_tokens": None,
+        "reasoning_effort": "",         # "", low, medium, xhigh
+        "enable_thinking": None,        # None = don't send it
+        "stream": False,
+        "context_window": None,         # tokens; None = no guard
+        "json_mode": False,
+    },
+    "output": {
+        "directory": "output",
+        "filename": "draft.md",
+        "overwrite": True,
+        "interim": True,
+        "log": True,
+    },
+    "web_search": {
+        "enabled": False,
+        "searxng_url": "http://localhost:8888",
+        "auto_start": "ask",            # ask | yes | no: offer a container
+        "docker_image": "searxng/searxng",
+        "queries_per_chapter": 3,
+        "results_per_query": 4,
+        "snippet_chars": 300,
+        "categories": "general",
+        "timeout": 15,
+        "double_check": True,           # second model pass over each verdict
+        "banned_terms": [],             # never allowed in a search query
+    },
+}
+
 AGENTS = ("architect", "planner", "researcher", "verifier", "writer",
           "extractor",
           "reviewer", "editor")

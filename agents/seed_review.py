@@ -35,7 +35,7 @@ _input = input          # replaced in tests
 
 def mode():
     """'ask', 'warn' or 'off'. 'ask' becomes 'warn' without a terminal."""
-    value = str(get_config()["book"].get("seed_review", "ask")).strip().lower()
+    value = str(get_config()["book"]["seed_review"]).strip().lower()
     if value in ("false", "no", "none"):
         value = "off"
     if value not in ("ask", "warn", "off"):
@@ -223,8 +223,8 @@ def recommended_size(assessment, words_per_chapter):
     """The model's recommendation, kept inside the configured chapter limits
     and any chapter range the seed states."""
     book = get_config()["book"]
-    lo = int(book.get("min_chapters", 3))
-    hi = max(lo, int(book.get("max_chapters", 30)))
+    lo = int(book["min_chapters"])
+    hi = max(lo, int(book["max_chapters"]))
     stated = assessment["stated"]
     lo = max(lo, stated.get("chapters_min") or 0)
     if stated.get("chapters_max"):
@@ -414,13 +414,13 @@ def run_seed_review(seed_text, num_chapters=None, outline_chapters=0):
     Never raises except EndpointUnavailable.
     """
     book = get_config()["book"]
-    wpc = int(book.get("words_per_chapter", 800))
+    wpc = int(book["words_per_chapter"])
     result = {"chapters": None, "words_per_chapter": wpc,
               "clarifications": [], "stop": False}
     how = mode()
     if how == "off":
         return result
-    max_q = int(book.get("seed_questions", 5)) if how == "ask" else 0
+    max_q = int(book["seed_questions"]) if how == "ask" else 0
     print("[SEED REVIEW] Checking that the seed can carry the book's length...")
 
     # the first call is told the size we already know (-c or the outline);

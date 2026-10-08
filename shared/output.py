@@ -34,7 +34,7 @@ def atomic_write_text(path, text):
 
 def interim_enabled():
     """Whether interim output is on (config output.interim, default True)."""
-    return bool(get_config().get("output", {}).get("interim", True))
+    return bool(get_config()["output"]["interim"])
 
 
 def interim_dir():

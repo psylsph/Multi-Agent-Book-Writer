@@ -64,7 +64,7 @@ def test_missing_config_error_points_at_the_example(tmp_path):
 
 def test_enabled_is_only_used_for_agents_that_honour_it():
     """Only these agents read `enabled`; elsewhere it would silently do
-    nothing (see main.agent_enabled and the editor's reviewer check)."""
+    nothing (see llm_client.agent_enabled)."""
     honoured = {"researcher", "reviewer", "editor"}
     for path in [EXAMPLE] + ([ACTIVE] if ACTIVE.exists() else []):
         for agent, values in (_raw(path).get("agents") or {}).items():

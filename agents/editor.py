@@ -12,7 +12,8 @@ from pathlib import Path
 from shared import prompts
 from shared.context import context, update_context
 from shared.llm_utils import clean_llm_text
-from shared.llm_client import EndpointUnavailable, generate_prose, get_config
+from shared.llm_client import EndpointUnavailable, agent_enabled, \
+    generate_prose, get_config
 from shared.output import (atomic_write_text, chapter_filename,
                            format_bible_markdown, save_chapter, save_interim)
 from shared.consistency import (check_chronology, format_findings,
@@ -146,15 +147,15 @@ def run_editor(only=None):
     drafts = context.get("drafts", {})
     chronology = context.get("chronology") or {}
     constraints = bible.get("constraints") or []
-    max_rounds = int(cfg["book"].get("revision_rounds", 2))
-    target_words = int(cfg["book"].get("words_per_chapter", 800))
-    tolerance = float(cfg["book"].get("word_count_tolerance", 0.8))
+    max_rounds = int(cfg["book"]["revision_rounds"])
+    target_words = int(cfg["book"]["words_per_chapter"])
+    tolerance = float(cfg["book"]["word_count_tolerance"])
     min_words = int(target_words * tolerance)
-    max_wc_rounds = int(cfg["book"].get("extra_length_rounds", 2))
-    reviewer_on = cfg.get("agents", {}).get("reviewer", {}).get("enabled", True)
+    max_wc_rounds = int(cfg["book"]["extra_length_rounds"])
+    reviewer_on = agent_enabled("reviewer")
     reference = _bible_reference(bible)
-    name_ignore = cfg["book"].get("name_lint_ignore") or []
-    repetition_on = bool(cfg["book"].get("repetition_lint", True))
+    name_ignore = cfg["book"]["name_lint_ignore"] or []
+    repetition_on = bool(cfg["book"]["repetition_lint"])
     character_names = [c.get("name", "") for c in bible.get("characters") or []]
     alias_map = {c["name"]: c["aliases"] for c in bible.get("characters") or []
                  if c.get("aliases")}
@@ -348,8 +349,8 @@ def _write_lint_report(final_chapters):
     cfg = get_config()
     bible = context.get("bible") or {}
     constraints = bible.get("constraints") or []
-    target_words = int(cfg["book"].get("words_per_chapter", 800))
-    tolerance = float(cfg["book"].get("word_count_tolerance", 0.8))
+    target_words = int(cfg["book"]["words_per_chapter"])
+    tolerance = float(cfg["book"]["word_count_tolerance"])
     min_words = int(target_words * tolerance)
     full_text = "\n\n".join(final_chapters)
     bodies = {}
@@ -360,8 +361,8 @@ def _write_lint_report(final_chapters):
                                        if "\n\n" in entry else "")
     findings = lint_book(
         full_text, bible, constraints,
-        cfg["book"].get("name_lint_ignore") or [],
-        bodies if cfg["book"].get("repetition_lint", True) else None)
+        cfg["book"]["name_lint_ignore"] or [],
+        bodies if cfg["book"]["repetition_lint"] else None)
 
     # per-chapter word counts (wc -w semantics)
     chapters = context.get("chapters", [])
@@ -397,9 +398,9 @@ def save_book(final_chapters):
     out_dir = Path(cfg["output"]["directory"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    filename = cfg["output"].get("filename", "draft.md")
+    filename = cfg["output"]["filename"]
     out_path = out_dir / filename
-    if not cfg["output"].get("overwrite", True) and out_path.exists():
+    if not cfg["output"]["overwrite"] and out_path.exists():
         stem, suffix = out_path.stem, out_path.suffix or ".txt"
         i = 1
         while (out_dir / f"{stem}-{i}{suffix}").exists():

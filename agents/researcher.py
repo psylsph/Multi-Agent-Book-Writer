@@ -159,7 +159,7 @@ Use "unclear" unless a result directly addresses the claim. Return ONLY a JSON a
                 system=prompts.VERIFIER, agent="verifier")
             verdicts = web_search.validate_verdicts(
                 claims, extract_json(raw, expect="array"))
-            if ws.get("double_check", True):
+            if ws["double_check"]:
                 verdicts = _double_check(n, verdicts)
         except EndpointUnavailable:
             raise

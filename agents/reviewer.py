@@ -47,7 +47,7 @@ CONSTRAINT: the draft breaks one of the AUTHOR CONSTRAINTS below in a way a word
 
 def enabled_checks():
     """book.review_checks as an ordered tuple of known names (default all)."""
-    wanted = get_config()["book"].get("review_checks")
+    wanted = get_config()["book"]["review_checks"]
     if isinstance(wanted, str):
         wanted = [wanted]
     names = [str(w).strip().lower() for w in wanted or ()]
@@ -64,7 +64,7 @@ def _build_prompt(number, title, draft, checks, bible):
 
     if "continuity" in checks:
         prior = merge_states(chronology, upto=number)  # earlier chapters only
-        window = int(get_config()["book"].get("summary_window", 8))
+        window = int(get_config()["book"]["summary_window"])
         recap = render_story_so_far(
             {n: s.get("summary", "") for n, s in chronology.items()},
             before=number, window=window) or "(first chapter)"

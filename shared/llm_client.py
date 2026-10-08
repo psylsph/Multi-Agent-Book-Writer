@@ -6,6 +6,7 @@ OpenRouter, ...). Reads config.yaml once, applies per-agent temperature,
 and adds timeouts + retries with backoff.
 """
 
+import copy
 import json
 import os
 import re
@@ -20,22 +21,6 @@ from shared import config_schema
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 
 _config = None
-
-# Web search for the researcher (off unless enabled in config.yaml).
-WEB_SEARCH_DEFAULTS = {
-    "enabled": False,
-    "searxng_url": "http://localhost:8888",
-    "auto_start": "ask",            # ask | yes | no: offer a Docker container
-    "docker_image": "searxng/searxng",
-    "queries_per_chapter": 3,
-    "results_per_query": 4,
-    "snippet_chars": 300,
-    "categories": "general",
-    "timeout": 15,
-    "double_check": True,           # second model pass over each verdict
-    "banned_terms": [],            # never allowed in a search query
-}
-
 
 class EndpointUnavailable(RuntimeError):
     """The LLM endpoint is down, unreachable, or not ready (connection
@@ -72,36 +57,18 @@ def load_config(path=None):
         if not isinstance(agent_cfg, dict):
             _config["agents"][name] = {}
 
-    # sane defaults so a partial config file doesn't crash the pipeline
-    _config["book"].setdefault("num_chapters", 5)
-    _config["book"].setdefault("words_per_chapter", 800)
-    _config.setdefault("llm", {})
-    llm_cfg = _config["llm"]
-
     # migrate legacy 'ollama:' section if present and 'llm:' is unset
+    llm_cfg = _config["llm"]
     legacy = _config.get("ollama") or {}
     if "base_url" not in llm_cfg and legacy.get("api_url"):
         llm_cfg["base_url"] = legacy["api_url"]
     if "model" not in llm_cfg and legacy.get("model"):
         llm_cfg["model"] = legacy["model"]
 
-    llm_cfg.setdefault("base_url", "http://localhost:11434")
-    llm_cfg.setdefault("api_key", "")
-    llm_cfg.setdefault("model", "mistral")
-    llm_cfg.setdefault("timeout", 300)
-    llm_cfg.setdefault("retries", 2)
-    llm_cfg.setdefault("endpoint_wait", 300)  # s to wait for a downed server
-    llm_cfg.setdefault("reasoning_effort", "")  # "", low, medium, xhigh
-    llm_cfg.setdefault("enable_thinking", None)  # None = don't send it
-    llm_cfg.setdefault("stream", False)          # stream responses (progress)
-    llm_cfg.setdefault("context_window", None)   # tokens; None = no guard
-    llm_cfg.setdefault("json_mode", False)       # ask for JSON-object output
-    for key, value in WEB_SEARCH_DEFAULTS.items():
-        _config["web_search"].setdefault(key, value)
-    _config["output"].setdefault("directory", "output")
-    _config["output"].setdefault("filename", "draft.md")
-    _config["output"].setdefault("overwrite", True)
-    _config["output"].setdefault("log", True)
+    # every option the user left out takes its one documented default
+    for section, defaults in config_schema.DEFAULTS.items():
+        for key, value in defaults.items():
+            _config[section].setdefault(key, copy.deepcopy(value))
     return _config
 
 
@@ -110,6 +77,12 @@ def get_config():
     if _config is None:
         load_config()
     return _config
+
+
+def agent_enabled(name):
+    """agents.<name>.enabled (default True). Only the optional stages
+    (config_schema.ENABLE_HONOURED) read it."""
+    return bool(get_config()["agents"].get(name, {}).get("enabled", True))
 
 
 def _resolve_api_key(cfg):
@@ -357,8 +330,8 @@ def _request(messages, agent="writer", model=None, json_mode=False):
     # Only send a temperature the user configured; otherwise leave it to the
     # server/model (some models have their preferred sampling baked in).
     temperature = agent_cfg.get("temperature")
-    timeout = llm_cfg.get("timeout", 300)
-    retries = int(llm_cfg.get("retries", 2))
+    timeout = llm_cfg["timeout"]
+    retries = int(llm_cfg["retries"])
     headers = _headers(_resolve_api_key(llm_cfg))
     stream = bool(llm_cfg.get("stream"))
 
@@ -537,7 +510,7 @@ def wait_for_endpoint(max_wait=None, poll=5):
     responds, False once max_wait elapses.
     """
     if max_wait is None:
-        max_wait = int(get_config()["llm"].get("endpoint_wait", 300))
+        max_wait = int(get_config()["llm"]["endpoint_wait"])
     deadline = time.time() + max_wait
     while time.time() < deadline:
         if endpoint_ready():
@@ -557,7 +530,7 @@ def _call_with_wait(call):
     try:
         return call()
     except EndpointUnavailable:
-        wait = int(get_config()["llm"].get("endpoint_wait", 300))
+        wait = int(get_config()["llm"]["endpoint_wait"])
         print(f"[LLM] Endpoint unavailable; waiting up to {wait}s for it "
               "to come back...")
         if not wait_for_endpoint(wait):
