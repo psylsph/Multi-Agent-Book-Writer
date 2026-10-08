@@ -212,6 +212,3 @@ writer (the costly error); a wrong *no* only drops a good fact.
   (uid 977), so editing or deleting `settings.yml` needs `sudo`. A named Docker
   volume instead of a bind mount would avoid it. Stop the container with
   `docker stop book-writer-searxng`, remove it with `docker rm`.
-- **`config.yaml` is tracked in git** and holds machine-specific settings (model
-  name, port). Untracking it, keeping only `config.example.yaml`, is an open
-  decision.

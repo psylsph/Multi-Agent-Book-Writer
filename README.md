@@ -58,7 +58,7 @@ multi-agent-book-writer/
 ├── tests/                  # offline tests; fake_llm.py is an in-process fake server
 ├── ROADMAP.md              # what is planned and what is known to be missing
 ├── output/                 # generated books + interim progress artifacts
-├── config.yaml             # your settings: model, temperatures, timeouts, output
+├── config.yaml             # your settings (copy of the example; not tracked)
 ├── config.example.yaml     # every option documented, with defaults
 ├── pyproject.toml          # dependencies (managed with uv)
 ├── uv.lock
@@ -83,7 +83,14 @@ multi-agent-book-writer/
 
 2. **Point it at your LLM server**
 
-   Edit `config.yaml` (`config.example.yaml` documents every option) and set
+   Copy the example config (`config.yaml` is your local file and is not
+   tracked by git), then edit it:
+
+   ```bash
+   cp config.example.yaml config.yaml
+   ```
+
+   `config.example.yaml` documents every option. Set
    `llm.base_url` to your server (the OpenAI-compatible
    `/v1/chat/completions` path is appended automatically).
    Set `llm.model` to a model the server offers, and `llm.api_key` if the

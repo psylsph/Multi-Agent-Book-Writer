@@ -14,6 +14,7 @@ The project uses [uv](https://docs.astral.sh/uv/) (Python 3.11+).
 
 ```sh
 uv sync            # create .venv and install dependencies (incl. pytest)
+cp config.example.yaml config.yaml   # your local settings (untracked)
 uv run pytest      # run the test suite
 uv run ruff check .   # lint (bug-catching rules; CI runs this too)
 uv run main.py --help
@@ -68,7 +69,7 @@ The tests need no LLM server, network access or Docker, so they run anywhere. A 
 ### Guidelines
 
 - **Tests:** new behaviour needs tests in `tests/` (pytest). Tests must be offline and deterministic: stub the LLM (`generate_prose` / `generate_with_wait` and friends), HTTP, Docker and prompts, and use `tmp_path` for any files. A test must never write to the real `output/` directory.
-- **Config options:** if you add or rename an option, update both `config.yaml` and `config.example.yaml` (`tests/test_config_files.py` checks they stay in sync) and the README's configuration section.
+- **Config options:** if you add or rename an option, document it in `config.example.yaml` and add it to `shared/config_schema.py` (`tests/test_config_files.py` and `tests/test_config_schema.py` check they agree). `config.yaml` is your local, untracked copy and the README's configuration section.
 - **Dependencies:** add them with `uv add <package>` (or `uv add --dev <package>`) and commit the updated `pyproject.toml` and `uv.lock`. Prefer the standard library where it's enough.
 - **Code style:** match the surrounding code. Comment the *why* of non-obvious logic, not the *what*.
 - **Docs:** update the README / QUICKSTART when user-visible behaviour or command-line options change.

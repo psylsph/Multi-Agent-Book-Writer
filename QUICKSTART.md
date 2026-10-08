@@ -15,7 +15,13 @@ server works. Examples:
   the pipeline uses its OpenAI-compatible `/v1` API)
 - **Hosted APIs** - OpenAI, OpenRouter, etc. (set `llm.api_key` too)
 
-Then point `config.yaml` at it (`config.example.yaml` lists every option):
+Then create your local config (not tracked by git) and point it at the server
+(`config.example.yaml` lists every option):
+
+```bash
+cp config.example.yaml config.yaml
+```
+
 
 ```yaml
 llm:

@@ -90,6 +90,8 @@ def test_every_known_option_is_documented_in_the_example():
 
 def test_the_shipped_configs_only_use_known_options():
     for name in ("config.example.yaml", "config.yaml"):
+        if not (ROOT / name).exists():
+            continue  # config.yaml is local and untracked
         cfg = yaml.safe_load((ROOT / name).read_text()) or {}
         assert config_schema.problems(cfg) == [], name
 

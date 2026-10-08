@@ -47,6 +47,7 @@ logs/
 *.epub
 *.log
 .env
+config.yaml
 
 # Temporary files
 seed.md
