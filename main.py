@@ -12,7 +12,9 @@ import argparse
 import contextlib
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from agents.architect import run_architect
 from agents.planner import extract_seed_outline, run_planner
@@ -216,10 +218,161 @@ def _incomplete_chapters(context, editor_on):
             if c["number"] not in done]
 
 
+@dataclass
+class Run:
+    """One pipeline run: its settings, plus what one stage hands the next."""
+    seed_text: str
+    num_chapters: int | None = None   # None: the seed review/planner decide
+    resuming: bool = False
+    plan_only: bool = False
+    interleave: bool = False          # book.review_as_you_go (and editor on)
+    clarifications: list = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Stage:
+    """One step of the pipeline.
+
+    run(run) does the work and returns an exit code to stop the pipeline
+    there, or None to go on. wanted(run) False leaves the stage out entirely
+    (an agent switched off, the other branch of review-as-you-go). done(run)
+    returns a message when the saved run already has the stage's result: the
+    message is printed instead of running it. Per-chapter resume (skipping
+    finished chapters) is done inside the agents.
+    """
+    name: str                       # phase name in the run statistics
+    title: str                      # the step banner
+    run: Callable[[Run], int | None]
+    wanted: Callable[[Run], bool] = lambda run: True
+    done: Callable[[Run], str | None] = lambda run: None
+
+
+def _seed_review(run):
+    plan = run_seed_review(run.seed_text, run.num_chapters,
+                           len(extract_seed_outline(run.seed_text)))
+    if plan["stop"]:
+        print("\n[PIPELINE] Stopped at the seed review; nothing was "
+              "written. Edit the seed (see output/interim/"
+              "seed_review.md) and rerun.")
+        return 0
+    run.clarifications = plan["clarifications"]
+    run.num_chapters = apply_plan(plan) or run.num_chapters
+    return None
+
+
+def _architect(run):
+    run_architect(run.seed_text, run.clarifications)
+
+
+def _planner(run):
+    if not run_planner(num_chapters=run.num_chapters):
+        print("[PIPELINE] Planning failed. Exiting.")
+        return 1
+    if run.plan_only:
+        print("\n[PIPELINE] Plan only: stopping after the outline "
+              "(output/interim/outline.md). Rerun without --plan-only to "
+              "write the book; it continues from this plan.")
+        return 0
+    return None
+
+
+def _researcher(run):
+    run_researcher()
+
+
+def _write_and_review(run):
+    run_interleaved()
+
+
+def _writer(run):
+    run_writer()
+
+
+def _editor(run):
+    run_editor()
+
+
+def _save_drafts(run):
+    save_book(get_context("drafts"))
+
+
+STAGES = (
+    Stage("seed review", "Step 0: Seed review (length and gaps)",
+          _seed_review, wanted=lambda run: not run.resuming),
+    Stage("architect", "Step 1: Architect (story bible)", _architect,
+          done=lambda run: (run.resuming and get_context("bible")
+                            and "Story bible loaded from the saved run; "
+                                "skipping.") or None),
+    Stage("planner", "Step 2: Planner (chapter outline)", _planner),
+    Stage("researcher", "Step 3: Researcher (lore briefs)",
+          _researcher,
+          wanted=lambda run: agent_enabled("researcher")),
+    # review as you go: each chapter is written, then reviewed and polished,
+    # before the next one is started
+    Stage("write + review", "Steps 4-5: Write & Review chapter by chapter",
+          _write_and_review, wanted=lambda run: run.interleave),
+    Stage("writer", "Step 4: Writer (chapter drafts)",
+          _writer, wanted=lambda run: not run.interleave),
+    Stage("editor", "Step 5: Review & Edit (continuity, lint, revise, polish)",
+          _editor,
+          wanted=lambda run: not run.interleave and agent_enabled("editor")),
+    Stage("save drafts", "Step 5: Editor disabled; saving drafts.",
+          _save_drafts,
+          wanted=lambda run: not run.interleave
+          and not agent_enabled("editor")),
+)
+
+
+def _run_stages(run, phases):
+    """Run every wanted stage in order. Returns an exit code when a stage
+    stopped the pipeline, else None."""
+    for stage in STAGES:
+        if not stage.wanted(run):
+            continue
+        print(f"\n[PIPELINE] {stage.title}")
+        print("-" * 60)
+        skip = stage.done(run)
+        if skip:
+            print(f"[PIPELINE] {skip}")
+            continue
+        with _phase(phases, stage.name):
+            code = stage.run(run)
+        if code is not None:
+            return code
+    return None
+
+
+def _summary(started):
+    """Print the end-of-run summary. Returns the exit code (1 when chapters
+    are unfinished)."""
+    context = get_context()
+    incomplete = _incomplete_chapters(context, agent_enabled("editor"))
+    print("\n" + "=" * 60)
+    print("PIPELINE COMPLETE!" if not incomplete else "PIPELINE INCOMPLETE")
+    print("=" * 60)
+    print(f"Title: {context['title']}")
+    print(f"Chapters: {len(context['chapters'])}")
+    print(f"Drafted: {len(context['drafts'])} | "
+          f"Edited: {len(context['final'])}")
+    print(f"Total time: {(time.time() - started) / 60:.1f} minutes")
+    unreviewed = sorted(context.get("unreviewed") or ())
+    if unreviewed:
+        print("Not reviewed (the reviewer's reply could not be read): "
+              "chapters " + ", ".join(str(n) for n in unreviewed)
+              + ". See interim/review_chapter_NN.md.")
+    if incomplete:
+        print("Chapters not finished: "
+              + ", ".join(str(n) for n in incomplete))
+        print("The book saved so far is partial. Fix the error above, "
+              "then rerun the same command to resume.")
+    print("=" * 60)
+    return 1 if incomplete else 0
+
+
 def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None,
                  plan_only=False):
     """
-    Execute the complete book writing pipeline.
+    Execute the complete book writing pipeline (see STAGES).
 
     Args:
         seed_text: the creative seed (premise, characters, world, outline...)
@@ -232,129 +385,28 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None,
     print("MULTI-AGENT BOOK WRITER")
     print("=" * 60)
 
-    start_time = time.time()
+    started = time.time()
     llm_client.reset_stats()
     phases = []
+    reset_context()
+    run = Run(seed_text, num_chapters, resuming, plan_only)
     if resuming:
         state = state or load_state()
-        reset_context()
         _hydrate_resume(state)
         print(f"[RESUME] Loaded {summarize_for_log(state)}.")
-        if interim_enabled():
-            print(f"[PIPELINE] Interim artifacts: {interim_dir()}/")
+        # the size the seed review settled when the run began
+        run.num_chapters = num_chapters or apply_plan(load_plan())
     else:
-        reset_context()
         archived = archive_previous_run()  # moved aside, never deleted
         if archived:
             print(f"[PIPELINE] Previous run archived to {archived}/")
-        if interim_enabled():
-            print(f"[PIPELINE] Interim artifacts: {interim_dir()}/")
+    if interim_enabled():
+        print(f"[PIPELINE] Interim artifacts: {interim_dir()}/")
 
     try:
-        # Step 0: Can the seed carry the requested length? (questions, size)
-        clarifications = []
-        if resuming:
-            planned = apply_plan(load_plan())
-            num_chapters = num_chapters or planned
-        else:
-            print("\n[PIPELINE] Step 0: Seed review (length and gaps)")
-            print("-" * 60)
-            with _phase(phases, "seed review"):
-                plan = run_seed_review(
-                    seed_text, num_chapters,
-                    len(extract_seed_outline(seed_text)))
-            if plan["stop"]:
-                print("\n[PIPELINE] Stopped at the seed review; nothing was "
-                      "written. Edit the seed (see output/interim/"
-                      "seed_review.md) and rerun.")
-                return 0
-            clarifications = plan["clarifications"]
-            num_chapters = apply_plan(plan) or num_chapters
-
-        # Step 1: Story bible from the seed prompt
-        print("\n[PIPELINE] Step 1: Architect (story bible)")
-        print("-" * 60)
-        if resuming and get_context("bible"):
-            print("[PIPELINE] Story bible loaded from the saved run; "
-                  "skipping.")
-        else:
-            with _phase(phases, "architect"):
-                run_architect(seed_text, clarifications)
-
-        # Step 2: Chapter outline (honors the seed's own outline)
-        print("\n[PIPELINE] Step 2: Planner (chapter outline)")
-        print("-" * 60)
-        with _phase(phases, "planner"):
-            chapters = run_planner(num_chapters=num_chapters)
-        if not chapters:
-            print("[PIPELINE] Planning failed. Exiting.")
-            return 1
-        if plan_only:
-            print("\n[PIPELINE] Plan only: stopping after the outline "
-                  "(output/interim/outline.md). Rerun without --plan-only to "
-                  "write the book; it continues from this plan.")
-            return 0
-
-        # Step 3: Lore briefs per chapter
-        if agent_enabled("researcher"):
-            print("\n[PIPELINE] Step 3: Researcher (lore briefs)")
-            print("-" * 60)
-            with _phase(phases, "researcher"):
-                run_researcher()
-
-        interleave = review_as_you_go()
-        if interleave:
-            # Steps 4+5 together: each chapter is written, then reviewed and
-            # polished, before the next one is started.
-            print("\n[PIPELINE] Steps 4-5: Write & Review chapter by chapter")
-            print("-" * 60)
-            with _phase(phases, "write + review"):
-                run_interleaved()
-        else:
-            # Step 4: Continuity-aware drafting
-            print("\n[PIPELINE] Step 4: Writer (chapter drafts)")
-            print("-" * 60)
-            with _phase(phases, "writer"):
-                run_writer()
-
-        # Step 5: Review, revise & polish (lint + reviewer + editor loop)
-        if interleave:
-            pass  # already done chapter by chapter above
-        elif agent_enabled("editor"):
-            print("\n[PIPELINE] Step 5: Review & Edit "
-                  "(continuity, lint, revise, polish)")
-            print("-" * 60)
-            with _phase(phases, "editor"):
-                run_editor()
-        else:
-            print("\n[PIPELINE] Step 5: Editor disabled; saving drafts.")
-            save_book(get_context("drafts"))
-
-        context = get_context()
-        elapsed = time.time() - start_time
-        incomplete = _incomplete_chapters(context, agent_enabled("editor"))
-        print("\n" + "=" * 60)
-        print("PIPELINE COMPLETE!" if not incomplete
-              else "PIPELINE INCOMPLETE")
-        print("=" * 60)
-        print(f"Title: {context['title']}")
-        print(f"Chapters: {len(context['chapters'])}")
-        print(f"Drafted: {len(context['drafts'])} | "
-              f"Edited: {len(context['final'])}")
-        print(f"Total time: {elapsed / 60:.1f} minutes")
-        unreviewed = sorted(context.get("unreviewed") or ())
-        if unreviewed:
-            print("Not reviewed (the reviewer's reply could not be read): "
-                  "chapters " + ", ".join(str(n) for n in unreviewed)
-                  + ". See interim/review_chapter_NN.md.")
-        if incomplete:
-            print("Chapters not finished: "
-                  + ", ".join(str(n) for n in incomplete))
-            print("The book saved so far is partial. Fix the error above, "
-                  "then rerun the same command to resume.")
-        print("=" * 60)
-        return 1 if incomplete else 0
-
+        run.interleave = review_as_you_go()
+        code = _run_stages(run, phases)
+        return code if code is not None else _summary(started)
     except KeyboardInterrupt:
         print("\n[PIPELINE] Interrupted by user. Rerun the same command to "
               "resume.")

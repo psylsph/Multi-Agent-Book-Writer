@@ -29,7 +29,8 @@ Python 3.11, 3.12 and 3.13. Keep `uv.lock` in sync: add dependencies with
 ## Layout and pipeline
 
 ```
-main.py            CLI + orchestration (run_pipeline, run_interleaved, resume checks)
+main.py            CLI + orchestration: STAGES (the pipeline steps), run_pipeline,
+                   run_interleaved, resume checks
 agents/            one module per pipeline stage
   seed_review.py   step 0: can the seed carry the requested length? asks questions
   architect.py     step 1: seed -> story bible (JSON); seed characters/constraints taken verbatim
@@ -57,7 +58,11 @@ tests/             pytest; tests/fake_llm.py is an in-process fake OpenAI server
 seeds/             SEED_SCHEMA.md (format) and example_seed.md
 ```
 
-Flow: `seed_review -> architect -> planner -> researcher -> writer -> editor`.
+Flow: `seed_review -> architect -> planner -> researcher -> writer -> editor`,
+declared as the `STAGES` tuple in `main.py`. Each `Stage` has a run function
+(returns an exit code to stop, or None), a `wanted` predicate (agent switched
+off, review-as-you-go branch) and a `done` check for resume. Add or reorder steps
+there, not with new branches in `run_pipeline`.
 With `book.review_as_you_go: true` (`run_interleaved` in `main.py`) each chapter is
 written, edited and has its story state re-extracted before the next is drafted.
 

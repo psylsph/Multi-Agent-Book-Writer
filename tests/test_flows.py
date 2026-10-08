@@ -792,3 +792,47 @@ def test_a_stage_never_swallows_a_state_write_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(researcher, "save_state", broken)
     with pytest.raises(StateWriteError):
         researcher.run_researcher()
+
+
+@pytest.mark.parametrize("book,agents,expected", [
+    ("", "", ["seed review", "architect", "planner", "writer", "editor"]),
+    ("  review_as_you_go: true\n", "",
+     ["seed review", "architect", "planner", "write + review"]),
+    ("", "  editor:\n    enabled: false\n",
+     ["seed review", "architect", "planner", "writer", "save drafts"]),
+    ("", "  researcher:\n    enabled: true\n",
+     ["seed review", "architect", "planner", "researcher", "writer",
+      "editor"]),
+])
+def test_the_stages_that_run_follow_the_config(tmp_path, monkeypatch, book,
+                                               agents, expected):
+    if "researcher" not in agents:          # off unless the case turns it on
+        agents = "  researcher:\n    enabled: false\n" + agents
+    _config(tmp_path, book=book, agents=agents)
+    _stub_pipeline(monkeypatch, run_interleaved=lambda: None,
+                   save_book=lambda drafts: None)
+    run = pipeline.Run("seed", interleave=pipeline.review_as_you_go())
+    phases = []
+    assert pipeline._run_stages(run, phases) is None
+    assert [name for name, _ in phases] == expected
+
+
+def test_a_stage_already_in_the_saved_run_is_announced_not_rerun(
+        tmp_path, monkeypatch, capsys):
+    _config(tmp_path, agents="  researcher:\n    enabled: false\n")
+    _stub_pipeline(monkeypatch,
+                   run_architect=lambda *a: pytest.fail("must not run"))
+    update_context("bible", {"title": "T"})
+    phases = []
+    pipeline._run_stages(pipeline.Run("seed", resuming=True), phases)
+    assert "Story bible loaded from the saved run; skipping." in \
+        capsys.readouterr().out
+    names = [name for name, _ in phases]
+    assert "architect" not in names and "seed review" not in names
+
+
+def test_a_stage_can_stop_the_pipeline(tmp_path, monkeypatch):
+    _config(tmp_path)
+    _stub_pipeline(monkeypatch, run_planner=lambda **k: [],
+                   run_writer=lambda **k: pytest.fail("must not run"))
+    assert pipeline._run_stages(pipeline.Run("seed"), []) == 1
