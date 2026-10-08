@@ -10,6 +10,7 @@ import copy
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -188,35 +189,41 @@ STATS = {}                     # agent -> counters, since reset_stats()
 _CHARS = {"chars": 0, "tokens": 0}   # calibrates characters per token
 _WARNED = set()                # agents already warned about context size
 _STATE = {"json_mode_broken": False}
+# Guards the counters above: LLM calls may run in threads (e.g. briefing
+# chapters in parallel), and `+=` on shared dicts is not atomic.
+_LOCK = threading.Lock()
 
 
 def reset_stats():
-    STATS.clear()
-    _CHARS.update(chars=0, tokens=0)
-    _WARNED.clear()
-    _STATE["json_mode_broken"] = False
+    with _LOCK:
+        STATS.clear()
+        _CHARS.update(chars=0, tokens=0)
+        _WARNED.clear()
+        _STATE["json_mode_broken"] = False
 
 
 def _record(agent, seconds, usage, prompt_chars):
-    s = STATS.setdefault(agent, {"calls": 0, "prompt_tokens": 0,
-                                 "completion_tokens": 0, "seconds": 0.0,
-                                 "unreported": 0})
-    s["calls"] += 1
-    s["seconds"] += seconds
-    if isinstance(usage, dict) and usage.get("prompt_tokens") is not None:
-        prompt_tokens = int(usage.get("prompt_tokens") or 0)
-        s["prompt_tokens"] += prompt_tokens
-        s["completion_tokens"] += int(usage.get("completion_tokens") or 0)
-        if prompt_tokens > 0:
-            _CHARS["chars"] += prompt_chars
-            _CHARS["tokens"] += prompt_tokens
-    else:
-        s["unreported"] += 1
+    with _LOCK:
+        s = STATS.setdefault(agent, {"calls": 0, "prompt_tokens": 0,
+                                     "completion_tokens": 0, "seconds": 0.0,
+                                     "unreported": 0})
+        s["calls"] += 1
+        s["seconds"] += seconds
+        if isinstance(usage, dict) and usage.get("prompt_tokens") is not None:
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            s["prompt_tokens"] += prompt_tokens
+            s["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+            if prompt_tokens > 0:
+                _CHARS["chars"] += prompt_chars
+                _CHARS["tokens"] += prompt_tokens
+        else:
+            s["unreported"] += 1
 
 
 def stats_data(phases=None):
     """Per-agent and total LLM usage (and phase timings) as plain data."""
-    agents = {a: dict(v) for a, v in STATS.items()}
+    with _LOCK:
+        agents = {a: dict(v) for a, v in STATS.items()}
     total = {k: sum(v[k] for v in agents.values())
              for k in ("calls", "prompt_tokens", "completion_tokens",
                        "seconds", "unreported")}
@@ -251,9 +258,9 @@ def stats_markdown(phases=None):
 
 def _chars_per_token():
     """Observed characters per prompt token (3.5 until enough is known)."""
-    if _CHARS["tokens"] >= 500:
-        return max(_CHARS["chars"] / _CHARS["tokens"], 1.5)
-    return 3.5
+    with _LOCK:
+        chars, tokens = _CHARS["chars"], _CHARS["tokens"]
+    return max(chars / tokens, 1.5) if tokens >= 500 else 3.5
 
 
 def _check_context(messages, agent, llm_cfg, agent_cfg=None):
@@ -265,7 +272,10 @@ def _check_context(messages, agent, llm_cfg, agent_cfg=None):
     estimate = chars / _chars_per_token()
     reserve = int(_max_tokens(llm_cfg, agent_cfg or {}, agent) or 0)
     if estimate + reserve > 0.9 * int(window):
-        _WARNED.add(agent)
+        with _LOCK:
+            if agent in _WARNED:
+                return          # another thread warned in the meantime
+            _WARNED.add(agent)
         print(f"[LLM] Warning: the {agent} prompt is about {estimate:,.0f} "
               f"tokens, close to the {int(window):,}-token context window "
               "(llm.context_window). A longer book may overflow it: lower "

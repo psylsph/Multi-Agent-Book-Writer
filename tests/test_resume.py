@@ -134,3 +134,37 @@ def test_the_new_layout_wins_over_an_old_one(tmp_path):
     save_interim_json("bible.json", {"title": "OLD"})
     save_state("bible", {"title": "NEW"})
     assert load_state()["bible"]["title"] == "NEW"
+
+
+
+def test_concurrent_writes_of_one_file_do_not_collide(tmp_path, monkeypatch):
+    """Both writers finish their temp file before either swaps it in: with
+    a shared temp name the second swap would find its file already gone."""
+    import os
+    import threading
+    from shared import output
+    out = _use_config(tmp_path)
+    (out / "interim").mkdir(parents=True)
+    both_written = threading.Barrier(2, timeout=5)
+    real_replace = os.replace
+
+    def replace(src, dst):
+        both_written.wait()
+        real_replace(src, dst)
+
+    monkeypatch.setattr(output.os, "replace", replace)
+    errors = []
+
+    def write(i):
+        try:
+            output.atomic_write_text(out / "interim" / "same.md", f"writer {i}")
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=write, args=(i,)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    assert [p.name for p in (out / "interim").iterdir()] == ["same.md"]

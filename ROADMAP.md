@@ -11,7 +11,9 @@ documenting) when it ships.
 - [ ] **Parallel research.** Lore briefs are independent per chapter, and so are
   the claim verifications within a chapter. Run them concurrently when the
   server has spare slots (llama.cpp `--parallel`, vLLM). Writing and editing
-  stay sequential because each chapter builds on the last.
+  stay sequential because each chapter builds on the last. The LLM statistics
+  and atomic file writes are already thread-safe; the cross-chapter
+  `seen_queries` de-duplication and SearXNG status cache are not.
 - [ ] **Per-agent `base_url`.** `agents.<name>.model` already lets an agent use a
   different model, but all models must live on one server. A per-agent URL (and
   key) would allow, say, a hosted reviewer with a local writer. Needs per-URL

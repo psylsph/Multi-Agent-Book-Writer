@@ -307,3 +307,4 @@ def test_the_tee_delegates_stream_attributes(tmp_path):
         assert sys.stdout.writable() in (True, False)     # delegated
     finally:
         runlog.stop_log()
+

@@ -14,9 +14,11 @@ off) and are never wiped by clear_interim(); a fresh start archives them (see
 archive_previous_run()) instead of deleting them.
 """
 
+import contextlib
 import json
 import os
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -27,9 +29,18 @@ def atomic_write_text(path, text):
     """Write text so a crash mid-write can never leave a truncated file:
     write a sibling temp file, then atomically swap it into place."""
     path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    # a temp name unique to this process and thread: two writers of the same
+    # file (threads, two runs) must not truncate each other's temp file.
+    # (Not mkstemp: its 0600 mode would make the book unreadable to others.)
+    tmp = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def interim_enabled():
