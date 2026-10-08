@@ -42,6 +42,7 @@ CRAMPED_WORDS_PER_SCENE = 700
 SEED_CHARS = 24000
 
 _input = input          # replaced in tests
+_INPUT = {"closed": False}  # stdin hit EOF: no one is there to answer
 
 
 def mode():
@@ -70,6 +71,7 @@ def _ask(question, default=""):
         answer = _input(question).strip()
     except EOFError:
         print()
+        _INPUT["closed"] = True
         return default
     return answer or default
 
@@ -347,8 +349,10 @@ def ask_questions(questions):
     out = []
     if not questions:
         return out
-    print(f"\n[SEED REVIEW] {len(questions)} question(s). Press Enter to keep "
-          "the assumption shown, or type 'skip' to accept all the rest.")
+    print(f"\n[SEED REVIEW] {len(questions)} question(s). Type your answer, "
+          "or press Enter to accept the suggestion shown; type 'skip' to "
+          "accept all the rest. Answers and accepted suggestions are built "
+          "into the seed.")
     skipping = False
     for i, q in enumerate(questions, 1):
         answer = ""
@@ -357,7 +361,8 @@ def ask_questions(questions):
             if q.get("why"):
                 print(f"     (why it matters: {q['why']})")
             if q.get("default"):
-                print(f"     [assumed if you don't answer: {q['default']}]")
+                print(f"     [suggestion, used if you press Enter: "
+                      f"{q['default']}]")
             answer = _ask("     > ")
             if answer.lower() == "skip":
                 skipping, answer = True, ""
@@ -397,8 +402,8 @@ def decide(requested, recommended):
     for key, text, _ in options:
         print(f"  [{key}] {text}" + ("  (Enter)" if key == default else ""))
     print("  [c] choose your own")
-    print("  [s] stop here: nothing is written, so you can edit the seed and "
-          "rerun")
+    print("  [s] stop here: no book is written; edit the seed and rerun (an "
+          "expanded seed is kept)")
     while True:
         choice = _ask("  > ", default).lower()[:1]
         for key, _, size in options:
@@ -427,8 +432,11 @@ def master_path():
 
 
 def build_expansion_prompt(seed_text, answers):
-    lines = "\n".join(f"- Q: {a['question']}\n  A: {a['answer']}"
-                      for a in answers)
+    lines = "\n".join(
+        f"- Q: {a['question']}\n  A"
+        + ("" if a.get("answered", True)
+           else " (the author accepted this suggestion)")
+        + f": {a['answer']}" for a in answers)
     return f"""Expand the creative brief below with the author's answers and notes.
 
 THE AUTHOR'S ANSWERS AND NOTES
@@ -596,6 +604,7 @@ def run_seed_review(seed_text, num_chapters=None, original=None,
 
     seed, pending = seed_text, list(clarifications)
     rounds = 0
+    _INPUT["closed"] = False
     assessment = None
     while True:
         try:
@@ -616,20 +625,25 @@ def run_seed_review(seed_text, num_chapters=None, original=None,
             break
 
         choice = _round_menu(assessment, flag)
+        if _INPUT["closed"]:
+            # every prompt would return its default ("answer", "keep") and
+            # the loop would expand the seed forever: treat it as done
+            print("[SEED REVIEW] No more input; the seed stands as it is.")
+            break
         if choice == "s":
             result.update(seed=seed, clarifications=pending, stop=True)
             return result
         if choice == "d":
             break
-        answers = [c for c in ask_questions(assessment["questions"])
-                   if c["answered"]]
+        # an accepted assumption is an answer too: build it in
+        answers = ask_questions(assessment["questions"])
         note = _ask("\n  Anything else to add or change in the seed? "
                     "(Enter for nothing)\n  > ")
         if note:
             answers.append({"question": "The author adds", "answer": note,
                             "answered": True})
-        if not answers:
-            print("[SEED REVIEW] Nothing new to add; the seed stands as it is.")
+        if not answers or _INPUT["closed"]:
+            print("[SEED REVIEW] Nothing to add; the seed stands as it is.")
             break
 
         to_build = pending + answers

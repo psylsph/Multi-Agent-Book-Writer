@@ -232,9 +232,10 @@ are divided.
    ```
 
    With `a` it asks up to `book.seed_questions` questions about gaps that would
-   change the book (a missing subplot, the ending, point of view; Enter accepts
-   the assumption shown, `skip` accepts all the rest), then lets you add notes
-   of your own. The model then **expands the seed** with your answers: it keeps
+   change the book (a missing subplot, the ending, point of view). Type an
+   answer, or press Enter to accept the suggestion shown (`skip` accepts all
+   the rest); then add notes of your own if you like. The model then **expands
+   the seed** with your answers and the suggestions you accepted: it keeps
    every word you wrote and adds the new material where it belongs (a character
    under Characters, an event in the Outline). You see what changed and keep it
    (`k`) or undo it (`u`; your answers are then passed on as clarifications).

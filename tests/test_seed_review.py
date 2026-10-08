@@ -305,16 +305,54 @@ def test_lost_material_checks():
     assert "shorter" in " | ".join(seed_review.lost_material(before, "# T\n"))
 
 
-def test_nothing_to_add_settles_the_seed_without_an_expansion(
+def test_accepted_suggestions_expand_the_seed_and_it_is_reviewed_again(
         tmp_path, monkeypatch):
+    """Pressing Enter on every question accepts its suggestion; that is an
+    answer, so the seed is expanded with it and critiqued again."""
     _config(tmp_path)
-    calls = _llm(monkeypatch, _assessment())
+    calls = _llm(monkeypatch, _assessment(), _assessment(questions=[]))
+    expansions = _expander(monkeypatch, EXPANDED)
+    _answers(monkeypatch, "a", "", "", "", "k", "d", "")
+    out = seed_review.run_seed_review(SEED)
+    prompt = expansions[0]["prompt"]
+    assert "(the author accepted this suggestion): No hosts subplot." in prompt
+    assert "Alternating Stuart and Kirsty." in prompt
+    assert len(calls) == 2                           # re-reviewed
+    assert out["seed"] == EXPANDED
+
+
+def test_skip_accepts_the_remaining_suggestions_too(tmp_path, monkeypatch):
+    _config(tmp_path)
+    _llm(monkeypatch, _assessment(), _assessment(questions=[]))
+    expansions = _expander(monkeypatch, EXPANDED)
+    _answers(monkeypatch, "a", "skip", "", "k", "d", "")
+    seed_review.run_seed_review(SEED)
+    assert "No hosts subplot." in expansions[0]["prompt"]
+
+
+def test_nothing_to_add_settles_the_seed_without_an_expansion(
+        tmp_path, monkeypatch, capsys):
+    _config(tmp_path)
+    calls = _llm(monkeypatch, _assessment(questions=[]))
     _expander(monkeypatch)                             # must not be called
-    _answers(monkeypatch, "a", "skip", "", "")
+    _answers(monkeypatch, "a", "", "")                 # no notes; size: keep
     out = seed_review.run_seed_review(SEED)
     assert len(calls) == 1
     assert out["chapters"] == 25 and out["seed"] == SEED
-    assert all(not c["answered"] for c in out["clarifications"])
+    assert "Nothing to add" in capsys.readouterr().out
+
+
+def test_closed_input_ends_the_loop_instead_of_expanding_forever(
+        tmp_path, monkeypatch, capsys):
+    """With stdin closed every prompt returns its default (answer, accept,
+    keep), which would expand the seed round after round."""
+    _config(tmp_path)
+    calls = _llm(monkeypatch, _assessment())
+    _expander(monkeypatch)                             # must not be called
+    _answers(monkeypatch)                              # EOF at once
+    out = seed_review.run_seed_review(SEED)
+    assert len(calls) == 1 and out["seed"] == SEED
+    assert "No more input" in capsys.readouterr().out
 
 
 def test_custom_size(tmp_path, monkeypatch):
