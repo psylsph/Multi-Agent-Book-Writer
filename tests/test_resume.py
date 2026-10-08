@@ -53,6 +53,9 @@ def test_a_run_saved_by_an_older_version_still_loads(tmp_path):
     assert state["final"] == {1: "final one", 2: "final form"}
     assert state["summaries"] == summaries
     assert state["chronology"] == chronology
+    # copied to the new layout once, so later saves and resumes use state/
+    assert (tmp_path / "out" / "state" / "bible.json").exists()
+    assert load_state()["final"] == {1: "final one", 2: "final form"}
 
 
 def test_strip_heading_leaves_headingless_text_alone():

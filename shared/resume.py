@@ -116,8 +116,10 @@ def load_state():
     """
     if _legacy():
         print("[RESUME] Reading a run saved by an older version "
-              f"({resume_dir()}/).")
-        return _load_legacy()
+              f"({resume_dir()}/); copying it to {state_dir()}/.")
+        out = _load_legacy()
+        _migrate(out)
+        return out
     out = _empty()
     d = state_dir()
     if not d.exists():
@@ -164,6 +166,26 @@ def _load_legacy():
                 continue
             out[key][n] = strip_heading(path.read_text(encoding="utf-8"))
     return out
+
+
+def _migrate(state):
+    """Save a run loaded from the old layout into state/, so later saves and
+    resumes all use one place. (A resumed run skips the architect, so
+    nothing else would ever write state/bible.json.)"""
+    if not state["bible"]:
+        return      # unreadable: main refuses to resume it anyway
+    plan = load_plan()
+    if plan is not None:
+        save_state("plan", plan)
+    for key, value in (("outline", state["chapters"]),
+                       ("research", state["research"]),
+                       ("drafts", state["drafts"]),
+                       ("summaries", state["summaries"]),
+                       ("chronology", state["chronology"]),
+                       ("final", state["final"])):
+        if value:
+            save_state(key, value)
+    save_state("bible", state["bible"])     # last: it marks the new layout
 
 
 def summarize_for_log(state):
