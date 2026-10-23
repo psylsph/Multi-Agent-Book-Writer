@@ -244,6 +244,38 @@ def test_generate_prose_continues_a_cut_off_reply(tmp_path, monkeypatch):
     assert "cut off" in follow_up[-1]["content"]
 
 
+def test_continuation_that_repeats_the_tail_joins_exactly(tmp_path,
+                                                          monkeypatch):
+    """A reply cut mid-word used to get a space inserted into the word."""
+    _use_config(tmp_path)
+    _post_recorder(monkeypatch, [
+        ("She walked to the conver", "length"),
+        ("walked to the conversation pit and sat down.", "stop")])
+    assert llm_client.generate_prose("write") == \
+        "She walked to the conversation pit and sat down."
+
+
+def test_continuation_joins_across_several_cuts(tmp_path, monkeypatch):
+    _use_config(tmp_path)
+    _post_recorder(monkeypatch, [
+        ("The long corridor ended in a heavy oak do", "length"),
+        ("ended in a heavy oak door that stuck", "length"),
+        ("a heavy oak door that stuck fast.", "stop")])
+    assert llm_client.generate_prose("write") == \
+        "The long corridor ended in a heavy oak door that stuck fast."
+
+
+@pytest.mark.parametrize("previous,addition,joined", [
+    ("The door opened and", "she walked in.", "The door opened and she walked in."),
+    ("The door opened and", " she walked in.", "The door opened and she walked in."),
+    ("End of a paragraph.", "\n\nNext one.", "End of a paragraph.\n\nNext one."),
+    # a short coincidental overlap is not a repeat
+    ("He went to the", "the market", "He went to the the market"),
+])
+def test_join_continuation_without_a_repeat(previous, addition, joined):
+    assert llm_client._join_continuation(previous, addition) == joined
+
+
 def test_generate_prose_gives_up_after_max_continuations(tmp_path,
                                                          monkeypatch):
     _use_config(tmp_path)

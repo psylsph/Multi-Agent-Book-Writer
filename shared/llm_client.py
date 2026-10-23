@@ -565,6 +565,26 @@ def generate_with_wait(prompt, system=None, agent="writer", model=None,
         lambda: generate(prompt, system=system, agent=agent, model=model))
 
 
+MIN_OVERLAP = 12   # characters of repeated tail that count as a real overlap
+
+
+def _join_continuation(previous, addition):
+    """Append a continuation to a reply that was cut off.
+
+    The reply is stripped, so a cut inside a word ("conver") can't be told
+    from one between words ("the") and a guessed separator splits words. The
+    continuation is therefore asked to start by repeating the last few words;
+    where its start matches the end of `previous` the repeat is dropped and
+    the two join exactly. A model that did not repeat gets the old join: a
+    space unless it already starts with whitespace."""
+    lead = addition.lstrip()
+    for size in range(min(len(previous), len(lead), 300), MIN_OVERLAP - 1, -1):
+        if previous.endswith(lead[:size]):
+            return previous + lead[size:]
+    return previous + (addition if addition.startswith((" ", "\n"))
+                       else " " + addition)
+
+
 def generate_prose(prompt, system=None, agent="writer", model=None,
                    max_continuations=3):
     """generate_with_wait() for long-form text: if the model stops because it
@@ -572,25 +592,25 @@ def generate_prose(prompt, system=None, agent="writer", model=None,
     so a chapter is never silently cut off mid-sentence."""
     messages = _messages(prompt, system)
     text, reason = _call_with_wait(lambda: _request(messages, agent, model))
-    parts = [text]
     for _ in range(max_continuations):
         if reason != "length":
-            return "".join(parts).strip()
+            return text.strip()
         print("[LLM] Response hit the length limit; asking the model to "
               "continue...")
         messages = messages + [
-            {"role": "assistant", "content": "".join(parts)},
+            {"role": "assistant", "content": text},
             {"role": "user", "content": "Your reply was cut off. Continue "
-             "exactly where it stopped. Do not repeat anything and do not "
-             "add commentary."},
+             "exactly where it stopped, starting with the last few words you "
+             "wrote (they will be trimmed off to join the two parts). Do not "
+             "repeat anything else and do not add commentary."},
         ]
-        text, reason = _call_with_wait(
+        more, reason = _call_with_wait(
             lambda: _request(messages, agent, model))
-        parts.append(text if text.startswith((" ", "\n")) else " " + text)
+        text = _join_continuation(text, more)
     if reason == "length":
         print("[LLM] Warning: the response is still cut off after "
               f"{max_continuations} continuations.")
-    return "".join(parts).strip()
+    return text.strip()
 
 
 def _model_matches(listed, wanted):
