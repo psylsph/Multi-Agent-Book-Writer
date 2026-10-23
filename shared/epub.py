@@ -137,6 +137,7 @@ def find_book_title(chapters_dir):
 # -------------------------------------------------------------- typography
 
 _OPENERS = " \t\n([{—–‘“-/"
+_AFTER_CLOSER = " \t\n.,;:!?)]}’”"   # what may follow a closing quote
 _ELISIONS = ("tis", "twas", "til", "cause", "em", "n", "round", "bout",
              "cept", "neath", "twere", "twill")
 
@@ -154,6 +155,12 @@ def smarten(text):
             j -= 1
         before = text[j] if j >= 0 else " "
         opening = before in _OPENERS
+        if before in "—–":
+            k = i + 1
+            while k < len(text) and text[k] in "*_":
+                k += 1
+            if (text[k:k + 1] or " ") in _AFTER_CLOSER:
+                opening = False           # interrupted speech: "Wait—" he said
         if ch == '"':
             out.append("“" if opening else "”")
             continue

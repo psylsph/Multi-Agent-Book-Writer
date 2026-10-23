@@ -62,6 +62,15 @@ def test_parse_chapter_without_a_heading_uses_the_fallback_number():
     ("Wait... what -- really?", "Wait… what — really?"),
     ("“Already” curly", "“Already” curly"),
     ("(\"quoted\")", "(“quoted”)"),
+    # a quote after a dash closes interrupted speech, opens when text follows
+    ('"Wait\u2014" he said.', "“Wait—” he said."),
+    ('"Wait--" he said.', "“Wait—” he said."),
+    ("'Wait\u2014' she said", "‘Wait—’ she said"),
+    ('"I thought you\u2014"\n\n"No."', "“I thought you—”\n\n“No.”"),
+    ('*"Wait\u2014"* he said.', "*“Wait—”* he said."),
+    ('She said\u2014"Go."', "She said—“Go.”"),
+    ('She said\u2014"*Go*"', "She said—“*Go*”"),
+    ('"Go\u2014now!"', "“Go—now!”"),
 ])
 def test_smarten(raw, smart):
     assert epub.smarten(raw) == smart
