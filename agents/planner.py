@@ -223,8 +223,10 @@ No markdown fences, no commentary - JSON only."""
     try:
         chapters = extract_json(raw, expect="array")
     except ValueError:
+        # still merged with the author's fixed chapters and held to the
+        # requested count below, like a JSON reply
         print("[PLANNER] JSON parse failed; falling back to line parsing.")
-        return _fallback_line_parse(raw)
+        chapters = _fallback_line_parse(raw)
 
     if not isinstance(chapters, list) or not chapters:
         raise ValueError("planner returned an empty outline")

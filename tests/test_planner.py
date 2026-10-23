@@ -98,3 +98,36 @@ def test_expansion_keeps_author_chapters_verbatim(cfg, monkeypatch):
     chapters = planner.run_planner(num_chapters=3)
     assert [c["title"] for c in chapters] == ["A", "B", "C"]
     assert [c["number"] for c in chapters] == [1, 2, 3]
+
+
+def test_line_parse_fallback_still_keeps_author_chapters(cfg, monkeypatch):
+    """A non-JSON reply used to be returned as the whole outline, dropping the
+    author's own chapters."""
+    update_context("seed", "# Outline\nChapter 1: A - first\nChapter 2: B - second\n")
+    _stub_llm(monkeypatch, "Chapter 3: C - third\nChapter 4: D - fourth\n")
+    chapters = planner.run_planner(num_chapters=4)
+    assert [c["title"] for c in chapters] == ["A", "B", "C", "D"]
+    assert [c["number"] for c in chapters] == [1, 2, 3, 4]
+    assert chapters[0]["summary"] == "first"
+
+
+def test_line_parse_fallback_that_echoes_the_author_chapters(cfg, monkeypatch):
+    update_context("seed", "# Outline\nChapter 1: A - first\nChapter 2: B - second\n")
+    _stub_llm(monkeypatch, "Chapter 1: Changed - x\nChapter 2: Changed2 - x\n"
+                           "Chapter 3: C - third\n")
+    chapters = planner.run_planner(num_chapters=3)
+    assert [c["title"] for c in chapters] == ["A", "B", "C"]
+
+
+def test_line_parse_fallback_is_held_to_the_requested_count(cfg, monkeypatch):
+    update_context("seed", SEED_NO_OUTLINE)
+    _stub_llm(monkeypatch, "Chapter 1: A - a\nChapter 2: B - b\n"
+                           "Chapter 3: C - c\n")
+    assert len(planner.run_planner(num_chapters=2)) == 2
+
+
+def test_unreadable_reply_keeps_the_seed_outline(cfg, monkeypatch):
+    update_context("seed", "# Outline\nChapter 1: A - first\nChapter 2: B - second\n")
+    _stub_llm(monkeypatch, "I cannot help with that.")
+    chapters = planner.run_planner(num_chapters=4)
+    assert [c["title"] for c in chapters] == ["A", "B"]
