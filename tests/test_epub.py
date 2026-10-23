@@ -1,5 +1,6 @@
 """The EPUB builder: typography, chapter parsing and the structure of the file."""
 
+import os
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -273,6 +274,25 @@ def test_title_falls_back_to_the_story_bible(tmp_path):
     (out / "story_bible.md").write_text("# Bible Title - Story Bible\n\n## x\n",
                                         encoding="utf-8")
     assert epub.load_chapters(out / "chapters")[0] == "Bible Title"
+
+
+def test_title_ignores_md_files_that_are_not_books(tmp_path):
+    """seed.md sorts before draft.md and also starts with '# Title'."""
+    out = _write_run(tmp_path)
+    (out / "seed.md").write_text("# The Seed Title\n\n## Premise\n\nx\n",
+                                 encoding="utf-8")
+    (out / "aaa-notes.md").write_text("# Notes\n\nnothing\n", encoding="utf-8")
+    assert epub.load_chapters(out / "chapters")[0] == "The Real Title"
+
+
+def test_title_comes_from_the_newest_book(tmp_path):
+    out = _write_run(tmp_path)                    # draft.md: "The Real Title"
+    older = out / "draft-1.md"                    # sorts first, but is older
+    older.write_text("# The Old Title\n\n## Chapter 1: x\n\ny\n",
+                     encoding="utf-8")
+    os.utime(older, (1_000_000, 1_000_000))
+    os.utime(out / "draft.md", (2_000_000, 2_000_000))
+    assert epub.load_chapters(out / "chapters")[0] == "The Real Title"
 
 
 def test_assembled_book_file_is_split_into_chapters(tmp_path):

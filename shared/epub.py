@@ -111,20 +111,33 @@ def load_chapters(source, keep_annotations=False):
     raise FileNotFoundError(f"no such chapter directory or file: {source}")
 
 
+_BOOK_HEADING_RE = re.compile(r"^#\s+(?!Chapter\b)(\S.*)$")
+
+
+def _book_title_of(path):
+    """The '# Title' of an assembled book file, or '' for any other .md file
+    (the master seed, notes, a chapter): a book has chapter headings."""
+    try:
+        text = path.read_text(encoding="utf-8").lstrip("\ufeff")
+    except OSError:
+        return ""
+    first, _, rest = text.partition("\n")
+    m = _BOOK_HEADING_RE.match(first.strip())
+    if m and any(_HEADING_RE.match(line.strip()) for line in rest.splitlines()):
+        return m.group(1).strip()
+    return ""
+
+
 def find_book_title(chapters_dir):
     """The book's title, from the pipeline's files next to the chapters:
-    the assembled draft's first line, else the saved story bible."""
+    the newest assembled book (draft.md, draft-2.md ...), else the saved
+    story bible."""
     out = Path(chapters_dir).resolve().parent
-    for name in sorted(out.glob("*.md")):
-        if name.name == "story_bible.md":
-            continue
-        try:
-            first = name.read_text(encoding="utf-8").lstrip("\ufeff").split(
-                "\n", 1)[0]
-        except OSError:
-            continue
-        if re.match(r"^#\s+(?!Chapter\b)\S", first):
-            return first.lstrip("# ").strip()
+    books = [p for p in out.glob("*.md") if p.name != "story_bible.md"]
+    for path in sorted(books, key=lambda p: p.stat().st_mtime, reverse=True):
+        title = _book_title_of(path)
+        if title:
+            return title
     bible = out / "story_bible.md"
     if bible.exists():
         first = bible.read_text(encoding="utf-8").split("\n", 1)[0]
