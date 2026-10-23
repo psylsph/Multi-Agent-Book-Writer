@@ -390,6 +390,7 @@ def _request(messages, agent="writer", model=None, json_mode=False):
                     and "response_format" in (response.text or "").lower()):
                 # the server doesn't do JSON mode: stop asking, retry now
                 payload.pop("response_format")
+                response.close()
                 _STATE["json_mode_broken"] = True
                 print("[LLM] The server rejected response_format; JSON mode "
                       "is off for the rest of this run.")
@@ -401,8 +402,17 @@ def _request(messages, agent="writer", model=None, json_mode=False):
                         raise ValueError("the stream contained no content")
                 else:
                     data = response.json()
-                    choice = data.get("choices", [{}])[0]
-                    content = choice.get("message", {}).get("content")
+                    # any reply that is not the usual shape (a proxy's own
+                    # JSON, "message": null) is malformed, not a crash
+                    if not isinstance(data, dict):
+                        raise ValueError("the reply is not a JSON object")
+                    choices = data.get("choices")
+                    choice = (choices[0] if isinstance(choices, list)
+                              and choices and isinstance(choices[0], dict)
+                              else {})
+                    message = choice.get("message")
+                    content = (message.get("content")
+                               if isinstance(message, dict) else None)
                     if content is None:
                         raise ValueError("response has no message content")
                     finish, usage = choice.get("finish_reason"), \
@@ -451,8 +461,18 @@ def _request(messages, agent="writer", model=None, json_mode=False):
             server_side = True
             last_error = ConnectionError("the response stream was "
                                          "interrupted")
+        except (requests.exceptions.InvalidURL,
+                requests.exceptions.InvalidSchema,
+                requests.exceptions.MissingSchema) as e:
+            last_error = RuntimeError(
+                f"llm.base_url ({base_url}) is not a usable URL: {e}")
+            break  # a typo in the config won't improve on retry
         except (KeyError, IndexError, ValueError) as e:
             last_error = RuntimeError(f"Malformed response from endpoint: {e}")
+        except requests.exceptions.RequestException as e:
+            # anything else requests raises (redirect loop, undecodable body)
+            last_error = RuntimeError(
+                f"the request to the LLM endpoint failed: {e}")
 
         if attempt < retries:
             wait = min(2 ** (attempt + 1), 30)  # 2s, 4s, 8s... capped at 30s

@@ -361,3 +361,106 @@ def test_preflight_still_reports_a_missing_default_model(tmp_path,
     _models_response(monkeypatch, ["something-else"])
     with pytest.raises(RuntimeError, match="main-model"):
         llm_client.preflight()
+
+
+class _JsonResp:
+    status_code = 200
+    text = ""
+
+    def __init__(self, body):
+        self._body = body
+
+    def json(self):
+        return self._body
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("body", [
+    ["not", "a", "dict"],
+    {"choices": [{"message": None}]},
+    {"choices": [None]},
+    {"choices": "nope"},
+    {"choices": []},
+    {"error": "proxy says no"},
+])
+def test_an_odd_200_reply_is_malformed_not_a_crash(tmp_path, monkeypatch, body):
+    _use_config(tmp_path)
+    monkeypatch.setattr(llm_client.requests, "post",
+                        lambda *a, **k: _JsonResp(body))
+    with pytest.raises(RuntimeError, match="Malformed response") as excinfo:
+        generate("hi", agent="writer")
+    assert not isinstance(excinfo.value, EndpointUnavailable)
+
+
+def test_an_odd_reply_is_retried(tmp_path, monkeypatch):
+    _use_config(tmp_path, retries=1)
+    monkeypatch.setattr(llm_client.time, "sleep", lambda s: None)
+    replies = iter([_JsonResp({"choices": [{"message": None}]}),
+                    _JsonResp({"choices": [{"message": {"content": "ok"}}]})])
+    monkeypatch.setattr(llm_client.requests, "post",
+                        lambda *a, **k: next(replies))
+    assert generate("hi", agent="writer") == "ok"
+
+
+def test_other_request_errors_are_reported_not_raised_raw(tmp_path, monkeypatch):
+    _use_config(tmp_path)
+    monkeypatch.setattr(llm_client.requests, "post",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            requests.exceptions.TooManyRedirects("loop")))
+    with pytest.raises(RuntimeError, match="request to the LLM endpoint failed") \
+            as excinfo:
+        generate("hi", agent="writer")
+    assert not isinstance(excinfo.value, EndpointUnavailable)
+
+
+def test_a_bad_base_url_fails_at_once_without_retrying(tmp_path, monkeypatch):
+    _use_config(tmp_path, retries=3)
+    calls = []
+
+    def post(*a, **k):
+        calls.append(1)
+        raise requests.exceptions.MissingSchema("no scheme")
+
+    monkeypatch.setattr(llm_client.requests, "post", post)
+    with pytest.raises(RuntimeError, match="not a usable URL"):
+        generate("hi", agent="writer")
+    assert len(calls) == 1
+
+
+def test_the_rejected_json_mode_response_is_closed(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text('llm:\n  base_url: "http://localhost:9"\n  model: m\n'
+                   "  retries: 0\n  json_mode: true\n")
+    load_config(cfg)
+    llm_client.reset_stats()
+    closed = []
+
+    class Rejected(_JsonResp):
+        status_code = 400
+        text = "unknown field response_format"
+
+        def close(self):
+            closed.append(1)
+
+    replies = iter([Rejected({}), _JsonResp(
+        {"choices": [{"message": {"content": "{}"}}]})])
+    monkeypatch.setattr(llm_client.requests, "post",
+                        lambda *a, **k: next(replies))
+    assert generate("hi", json_mode=True) == "{}"
+    assert closed == [1]
+    llm_client.reset_stats()
+
+
+def test_a_non_json_200_body_is_malformed(tmp_path, monkeypatch):
+    _use_config(tmp_path)
+
+    class Html(_JsonResp):
+        def json(self):
+            raise requests.exceptions.JSONDecodeError("Expecting value", "<html>", 0)
+
+    monkeypatch.setattr(llm_client.requests, "post",
+                        lambda *a, **k: Html(None))
+    with pytest.raises(RuntimeError, match="Malformed response"):
+        generate("hi", agent="writer")
