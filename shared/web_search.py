@@ -97,6 +97,23 @@ def banned_terms():
     return [" ".join(str(x).split()) for x in raw if x is not None and str(x).strip()]
 
 
+def character_terms(bible):
+    """Names of the bible's characters that must stay out of a query: each
+    full name and each declared alias of TWO or more words ("Aria Vance").
+    Single words are left out on purpose: a first name or nickname is often an
+    ordinary word ("Rose", "Will"), and dropping every query that contains one
+    would gut the fact-checking. List those in web_search.banned_terms."""
+    terms = []
+    for character in (bible or {}).get("characters") or []:
+        name = re.sub(r"\(.*?\)", " ", str(character.get("name", "")))
+        for term in [name, *(character.get("aliases") or [])]:
+            term = " ".join(str(term).split())
+            if len(term.split()) >= 2 and term.lower() not in (
+                    t.lower() for t in terms):
+                terms.append(term)
+    return terms
+
+
 def blocked_term(query, forbidden_terms):
     """The first banned term the query mentions (whole word, any case)."""
     low = query.lower()

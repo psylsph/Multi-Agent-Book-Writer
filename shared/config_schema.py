@@ -27,6 +27,7 @@ KNOWN_KEYS = {
         "enabled", "searxng_url", "auto_start", "docker_image",
         "queries_per_chapter", "results_per_query", "snippet_chars",
         "categories", "timeout", "double_check", "banned_terms",
+        "block_character_names",
     },
 }
 
@@ -86,6 +87,7 @@ DEFAULTS = {
         "timeout": 15,
         "double_check": True,           # second model pass over each verdict
         "banned_terms": [],             # never allowed in a search query
+        "block_character_names": True,  # also block the bible's full names
     },
 }
 

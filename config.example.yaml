@@ -233,6 +233,10 @@ web_search:
   # else is allowed. A query that mentions one (whole word, any case) is dropped
   # and logged. A query for a real place is only blocked if you list it.
   banned_terms: []        # e.g. ["Aria Vance", "Willow Rooms", "Hollowby"]
+  # Also block every story character's full name (two or more words, e.g. "Aria
+  # Vance") and any such nickname, without listing them. A single-word name is
+  # often an ordinary word, so those still need banned_terms.
+  block_character_names: true
   # Each verified claim gets a second, independent model check ("does this
   # quote, by itself, directly support/contradict it?"); a disagreement drops
   # the fact. Costs one short call per verified claim.

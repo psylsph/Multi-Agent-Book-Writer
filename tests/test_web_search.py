@@ -388,6 +388,32 @@ def test_verified_fact_reaches_the_brief_with_its_quote(tmp_path, monkeypatch):
     assert "**supported**" in audit and "how hospital wards triage" in audit
 
 
+def test_character_full_names_are_blocked_without_banned_terms(
+        tmp_path, monkeypatch, capsys):
+    _, _, searched = _research_setup(tmp_path, monkeypatch, banned="[]")
+    researcher.run_researcher()
+    assert searched == ["how hospital wards triage"]   # "Aria Vance ward" dropped
+    assert "1 full character name(s) are blocked" in capsys.readouterr().out
+
+
+def test_character_name_blocking_can_be_switched_off(tmp_path, monkeypatch):
+    _, _, searched = _research_setup(
+        tmp_path, monkeypatch,
+        banned="[]\n  block_character_names: false")
+    researcher.run_researcher()
+    assert "Aria Vance ward" in searched
+
+
+def test_character_terms_are_full_names_and_multi_word_aliases_only():
+    bible = {"characters": [
+        {"name": "Aria Vance (the nurse)", "aliases": ["Aria", "Ari Vance"]},
+        {"name": "Rose", "aliases": ["Rosie"]},            # one word: skipped
+        {"name": "Tom Baker"}, {"name": "tom baker"}, {"name": ""}, {}]}
+    assert web_search.character_terms(bible) == [
+        "Aria Vance", "Ari Vance", "Tom Baker"]
+    assert web_search.character_terms(None) == []
+
+
 def test_verifier_runs_with_its_own_system_prompt(tmp_path, monkeypatch):
     _, calls, _ = _research_setup(tmp_path, monkeypatch)
     researcher.run_researcher()
@@ -515,9 +541,10 @@ def test_researcher_never_searches_a_banned_term(tmp_path, monkeypatch, capsys):
     assert "banned term 'Willow Rooms'" in out
 
 
-def test_researcher_searches_anything_when_nothing_is_banned(tmp_path,
-                                                             monkeypatch):
-    _, _, searched = _research_setup(tmp_path, monkeypatch, banned="[]")
+def test_researcher_searches_anything_when_nothing_is_blocked(tmp_path,
+                                                              monkeypatch):
+    _, _, searched = _research_setup(
+        tmp_path, monkeypatch, banned="[]\n  block_character_names: false")
     researcher.run_researcher()
     assert searched == ["how hospital wards triage", "Aria Vance ward"]
 

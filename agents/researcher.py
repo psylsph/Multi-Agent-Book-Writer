@@ -193,6 +193,13 @@ def run_researcher():
     seen_queries = []  # searched so far, across chapters (skip repeats)
     use_web = web_search.enabled() and web_search.is_available()
     forbidden = web_search.banned_terms() if use_web else []
+    if use_web and web_search.settings().get("block_character_names", True):
+        names = web_search.character_terms(bible)
+        forbidden += [n for n in names if n.lower() not in
+                      (t.lower() for t in forbidden)]
+        if names:
+            print(f"[RESEARCHER] {len(names)} full character name(s) are "
+                  "blocked from search queries.")
     if use_web:
         print("[RESEARCHER] Web fact-checking is on "
               f"({web_search.settings()['searxng_url']}).")

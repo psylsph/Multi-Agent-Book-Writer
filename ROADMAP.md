@@ -180,11 +180,12 @@ writer (the costly error); a wrong *no* only drops a good fact.
   independent second check (`web_search.double_check`). None of that proves the
   model *understood* the quote. Read the first `search_chapter_NN.md` files of a
   new book.
-- **Search queries are only filtered by your list.** Every query is allowed
-  unless it mentions a term in `web_search.banned_terms`; story names are not
-  detected automatically (an earlier heuristic that did so was removed). The
-  model is told not to put story details in a query, but a name you did not
-  list can still be searched. Queries leave the machine via SearXNG's upstream
+- **Search queries are only filtered by a list.** Every query is allowed
+  unless it mentions a term in `web_search.banned_terms` or a character's full
+  (two-word) name or nickname (`web_search.block_character_names`). Single-word
+  names and invented places are not detected (an earlier heuristic that did so
+  was removed). The model is told not to put story details in a query, but a
+  term you did not list can still be searched. Queries leave the machine via SearXNG's upstream
   engines.
 - **Nicknames.** Declared aliases and a built-in table of common short forms are
   resolved in code; a nickname in neither relies on the extractor prompt.
