@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -490,6 +491,39 @@ def test_overwrite_false_numbers_the_books(tmp_path):
         editor.save_book({1: "text"})
         assert (out / expected).exists()
         assert context["output_path"].endswith(expected)
+
+
+def test_reuse_path_keeps_rewriting_the_same_numbered_book(tmp_path):
+    out = _config(tmp_path, output_extra="  overwrite: false\n")
+    update_context("title", "T")
+    editor.save_book({1: "text"})                    # draft.md
+    editor.save_book({1: "text"})                    # draft-1.md
+    first = context["output_path"]
+    editor.save_book({1: "text", 2: "more"}, reuse_path=True)
+    editor.save_book({1: "text", 2: "more"}, reuse_path=True)
+    assert context["output_path"] == first
+    assert sorted(p.name for p in out.glob("draft*.md")) == [
+        "draft-1.md", "draft.md"]
+    assert "more" in Path(first).read_text()
+
+
+def test_review_as_you_go_with_overwrite_off_writes_one_book(
+        tmp_path, monkeypatch):
+    """run_editor(only=n) re-saves the book after every chapter; with
+    output.overwrite off that used to leave one numbered copy per chapter."""
+    drafts = {n: _words(120, f"c{n}") for n in (1, 2)}
+    out = _editor(monkeypatch, tmp_path, drafts,
+                  lambda prompt, **k: _echo_polish(prompt))
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(cfg_path.read_text().replace(
+        f'directory: "{out}"\n', f'directory: "{out}"\n  overwrite: false\n'))
+    load_config(cfg_path)
+    for n in (1, 2):
+        editor.run_editor(only=n)
+    editor.finalize_book(context["final"], reuse_path=True)
+    books = sorted(p.name for p in out.glob("draft*.md"))
+    assert books == ["draft.md"]
+    assert "c2" in (out / "draft.md").read_text()
 
 
 def test_a_book_that_cannot_be_written_is_returned_not_lost(

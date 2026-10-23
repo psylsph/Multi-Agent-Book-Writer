@@ -376,7 +376,9 @@ Return ONLY the edited chapter, starting with its original heading."""
         print(f"[EDITOR] Chapter {n} complete.")
 
     update_context("final", final)
-    return finalize_book(final)
+    # one chapter at a time (review as you go): keep rewriting the same book
+    # file, or overwrite: false would leave one numbered copy per chapter
+    return finalize_book(final, reuse_path=only is not None)
 
 
 def _in_book_order(bodies):
@@ -388,11 +390,11 @@ def _in_book_order(bodies):
     return [(n, titles.get(n, ""), bodies[n]) for n in order if bodies[n]]
 
 
-def finalize_book(bodies):
+def finalize_book(bodies, reuse_path=False):
     """Re-emit the lint report and the assembled book. Idempotent.
-    bodies: {chapter number: body text}."""
+    bodies: {chapter number: body text}. reuse_path: see save_book()."""
     _write_lint_report(bodies)
-    return save_book(bodies)
+    return save_book(bodies, reuse_path=reuse_path)
 
 
 def _write_lint_report(bodies):
@@ -440,16 +442,23 @@ def _write_lint_report(bodies):
     save_interim("lint_report.md", "\n".join(lines) + "\n")
 
 
-def save_book(bodies):
+def save_book(bodies, reuse_path=False):
     """Assemble and write the book + story bible to the output directory.
-    bodies: {chapter number: body text}; headings come from the outline."""
+    bodies: {chapter number: body text}; headings come from the outline.
+
+    With output.overwrite off each call normally writes a NEW numbered file.
+    reuse_path=True rewrites the file this run already wrote instead, for
+    callers that save the same growing book repeatedly."""
     cfg = get_config()
     out_dir = Path(cfg["output"]["directory"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
     filename = cfg["output"]["filename"]
     out_path = out_dir / filename
-    if not cfg["output"]["overwrite"] and out_path.exists():
+    previous = context.get("output_path")
+    if reuse_path and previous and not cfg["output"]["overwrite"]:
+        out_path = Path(previous)
+    elif not cfg["output"]["overwrite"] and out_path.exists():
         stem, suffix = out_path.stem, out_path.suffix or ".txt"
         i = 1
         while (out_dir / f"{stem}-{i}{suffix}").exists():

@@ -218,7 +218,7 @@ def run_interleaved():
             continue  # edited (and refreshed) in an earlier run
         run_editor(only=n)
         refresh_state(n)
-    finalize_book(get_context("final"))
+    finalize_book(get_context("final"), reuse_path=True)
 
 
 def _incomplete_chapters(context, editor_on):

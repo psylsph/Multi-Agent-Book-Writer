@@ -70,7 +70,7 @@ def _stub_loop(monkeypatch, drafted=(1, 2, 3)):
     monkeypatch.setattr(pipeline, "refresh_state",
                         lambda n: events.append(("refresh", n)))
     monkeypatch.setattr(pipeline, "finalize_book",
-                        lambda final: events.append(("finalize", None)))
+                        lambda final, **kw: events.append(("finalize", None)))
     return events
 
 
