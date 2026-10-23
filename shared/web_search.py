@@ -402,13 +402,35 @@ def _container_state():
     return result.stdout.strip() or None
 
 
-def _wait_until_ready(seconds=90):
+def reachable(timeout=5):
+    """True when something answers at the SearXNG URL. Used to wait for a
+    container to come up: check() runs a real search, which SearXNG forwards
+    to its upstream engines, and polling with it would send dozens of
+    queries. Any HTTP answer below 500 counts (older versions have no
+    /healthz and return 404)."""
+    url = str(settings()["searxng_url"]).rstrip("/") + "/healthz"
+    try:
+        return requests.get(url, timeout=timeout).status_code < 500
+    except requests.exceptions.RequestException:
+        return False
+
+
+def _wait_until_ready(seconds=90, attempts=3):
+    """Wait for SearXNG to answer, then confirm with a real search (a few
+    tries: the engines can need a moment after the web server is up)."""
     deadline = time.time() + seconds
-    while time.time() < deadline:
-        if check()[0]:
-            return True
+    while not reachable():
+        if time.time() >= deadline:
+            return False
         time.sleep(3)
-    return check()[0]
+    for attempt in range(attempts):
+        ok, message = check()
+        if ok:
+            return True
+        if attempt + 1 < attempts:
+            time.sleep(3)
+    print(f"[SEARCH] SearXNG answers but cannot search: {message}")
+    return False
 
 
 def _ask(question):

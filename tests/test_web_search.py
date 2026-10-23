@@ -160,6 +160,7 @@ def docker_env(tmp_path, monkeypatch):
         return (True, "") if started else (False, "connection refused")
 
     monkeypatch.setattr(web_search, "check", check)
+    monkeypatch.setattr(web_search, "reachable", lambda timeout=5: True)
     monkeypatch.setattr(web_search, "_ask", lambda q: True)
     return fake
 
@@ -225,6 +226,61 @@ def test_stopped_container_is_started_not_recreated(docker_env, monkeypatch):
     assert web_search.offer_docker_setup() is True
     assert fake.ran("start") == [["start", web_search.CONTAINER_NAME]]
     assert not fake.ran("run")
+
+
+def test_waiting_for_the_container_polls_health_not_search(docker_env,
+                                                         monkeypatch):
+    """Polling with a real search sent a query upstream every few seconds."""
+    answers = iter([False, False, True])
+    searches = []
+    monkeypatch.setattr(web_search, "reachable",
+                        lambda timeout=5: next(answers))
+    monkeypatch.setattr(web_search, "check",
+                        lambda: searches.append(1) or (True, ""))
+    assert web_search._wait_until_ready() is True
+    assert len(searches) == 1
+
+
+def test_waiting_gives_up_when_nothing_answers(docker_env, monkeypatch):
+    monkeypatch.setattr(web_search, "reachable", lambda timeout=5: False)
+    monkeypatch.setattr(web_search, "check",
+                        lambda: pytest.fail("searched an unreachable server"))
+    ticks = iter(range(0, 1000, 50))
+    monkeypatch.setattr(web_search.time, "time", lambda: next(ticks))
+    assert web_search._wait_until_ready(seconds=90) is False
+
+
+def test_a_reachable_server_that_cannot_search_is_reported(
+        docker_env, monkeypatch, capsys):
+    monkeypatch.setattr(web_search, "check",
+                        lambda: (False, "HTTP 403: enable json"))
+    assert web_search._wait_until_ready() is False
+    assert "cannot search: HTTP 403" in capsys.readouterr().out
+
+
+def test_reachable_reads_healthz_and_treats_404_as_up(tmp_path, monkeypatch):
+    _config(tmp_path)
+    urls = []
+
+    class Resp:
+        status_code = 404
+
+    monkeypatch.setattr(web_search.requests, "get",
+                        lambda url, **k: urls.append(url) or Resp())
+    assert web_search.reachable() is True
+    assert urls[0].endswith("/healthz")
+    Resp.status_code = 502
+    assert web_search.reachable() is False
+
+
+def test_reachable_is_false_when_the_connection_fails(tmp_path, monkeypatch):
+    _config(tmp_path)
+
+    def refuse(*a, **k):
+        raise web_search.requests.exceptions.ConnectionError("refused")
+
+    monkeypatch.setattr(web_search.requests, "get", refuse)
+    assert web_search.reachable() is False
 
 
 def test_docker_failure_is_swallowed(docker_env, monkeypatch):
