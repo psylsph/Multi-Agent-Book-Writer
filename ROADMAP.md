@@ -39,7 +39,7 @@ documenting) when it ships.
   books so the same fact is not searched twice.
 
 ### Output
-- [ ] **EPUB / PDF export** (pandoc, or `ebooklib`): `--format epub`.
+- [ ] **PDF export** (pandoc). EPUB is done: `make_epub.py` (see the README).
 - [ ] **Streamlit UI** for monitoring a run and editing seeds.
 - [ ] **Character-voice conditioning** per point-of-view chapter.
 
@@ -54,9 +54,9 @@ documenting) when it ships.
   the wiring but not the quality. A small set of golden seeds run against a real
   model, with the outputs diffed after a prompt change, would catch regressions
   the unit tests cannot.
-- [ ] **CI hardening.** The workflow has not run yet (action versions are
-  unverified). Once it has: a coverage floor (`--cov-fail-under`), and a lockfile
-  freshness check.
+- [ ] **CI hardening.** The workflow runs and passes (ruff, then pytest on
+  Python 3.11-3.13). Still to add: a coverage floor (`--cov-fail-under`), and
+  a lockfile freshness check.
 - [ ] **Estimate tokens when the server hides usage.** The statistics report
   "did not report token usage" and count nothing; a labelled estimate would still
   give a useful tokens/s.
