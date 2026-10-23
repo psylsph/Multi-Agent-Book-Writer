@@ -106,15 +106,19 @@ def ground_state(state, text, variants_by_name):
     return out, dropped
 
 
-def death_hints(text, variants_by_name, context=600, limit=3):
+def death_hints(text, variants_by_name, context=600, limit=6):
     """Where death language is, and which characters it might concern.
 
     Each death word gets a snippet of `context` characters either side
-    (overlapping snippets merge; at most `limit` are kept). Returns
-    {name: [snippet, ...]} for every character NAMED inside a snippet. The
-    snippet is deliberately wide: a death is often written with a pronoun
-    ("He's gone") and the name sits a few sentences earlier; the model that
-    is shown the snippet resolves who it means.
+    (overlapping snippets merge). Returns {name: [snippet, ...]} for every
+    character NAMED inside a snippet. The snippet is deliberately wide: a
+    death is often written with a pronoun ("He's gone") and the name sits a
+    few sentences earlier; the model that is shown the snippet resolves who
+    it means.
+
+    Only snippets that name a character count toward `limit` (words like
+    "pulse" or "dead" turn up all through a thriller); when more remain, the
+    first and last are kept, because a death is set up early and shown late.
     """
     spans = sorted((max(0, m.start() - context),
                     min(len(text), m.end() + context))
@@ -126,10 +130,18 @@ def death_hints(text, variants_by_name, context=600, limit=3):
         else:
             merged.append([start, end])
     patterns = {name: _pattern(v) for name, v in variants_by_name.items()}
-    hints = {}
-    for start, end in merged[:limit]:
+    named = []          # (snippet, [names in it])
+    for start, end in merged:
         snippet = text[start:end].strip()
-        for name, pattern in patterns.items():
-            if pattern and pattern.search(snippet):
-                hints.setdefault(name, []).append(snippet)
+        names = [n for n, pattern in patterns.items()
+                 if pattern and pattern.search(snippet)]
+        if names:
+            named.append((snippet, names))
+    if len(named) > limit:
+        head = limit - limit // 2
+        named = named[:head] + named[len(named) - limit // 2:]
+    hints = {}
+    for snippet, names in named:
+        for name in names:
+            hints.setdefault(name, []).append(snippet)
     return hints

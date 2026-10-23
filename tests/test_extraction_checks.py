@@ -97,6 +97,28 @@ def test_overlapping_hints_merge_and_are_capped():
     assert len(xc.death_hints(far, variants, limit=3)["Marcus Reed"]) == 3
 
 
+def test_death_language_naming_nobody_does_not_use_up_the_limit():
+    """A thriller says "pulse" and "dead" all chapter; the first three such
+    spans used to be the only ones looked at, so a late death was missed."""
+    variants = {"Marcus Reed": xc.name_variants("Marcus Reed")}
+    filler = ("The pulse raced. " + "x " * 700) * 4
+    text = filler + "Then Marcus died in her arms."
+    hints = xc.death_hints(text, variants, limit=3)
+    assert "died in her arms" in hints["Marcus Reed"][0]
+
+
+def test_when_over_the_limit_the_first_and_last_spans_are_kept():
+    variants = {"Marcus Reed": xc.name_variants("Marcus Reed")}
+    gap = " " + "x " * 700
+    text = gap.join(f"Marcus died {i}." for i in range(8))
+    shown = xc.death_hints(text, variants, limit=4)["Marcus Reed"]
+    joined = " ".join(shown)
+    assert len(shown) == 4
+    assert "died 0." in joined and "died 1." in joined
+    assert "died 7." in joined and "died 6." in joined
+    assert "died 3." not in joined
+
+
 # --------------------------------------------- the writer's use of them
 
 CANON = ["Elizabeth Hale", "Tom Baker", "Marcus Reed"]
