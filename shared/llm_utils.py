@@ -29,26 +29,12 @@ def strip_code_fences(text):
     return _FENCE_RE.sub("", text).strip()
 
 
-def extract_json(text, expect="object"):
-    """Extract and parse the first JSON object or array from LLM output.
-
-    Args:
-        text: raw model output (may contain code fences or commentary)
-        expect: "object" or "array"
-
-    Returns the parsed Python object.
-
-    Raises ValueError if no balanced JSON of the expected kind is found.
-    """
-    cleaned = strip_code_fences(text)
-    open_ch, close_ch = ("{", "}") if expect == "object" else ("[", "]")
-    start = cleaned.find(open_ch)
-    if start == -1:
-        raise ValueError(f"no JSON {expect} found in model output")
-
+def _balanced_end(text, start, open_ch, close_ch):
+    """Index of the bracket closing the one at `start` (strings and escapes
+    respected), or None when it is never closed."""
     depth, in_str, esc = 0, False, False
-    for i in range(start, len(cleaned)):
-        ch = cleaned[i]
+    for i in range(start, len(text)):
+        ch = text[i]
         if in_str:
             if esc:
                 esc = False
@@ -63,17 +49,49 @@ def extract_json(text, expect="object"):
         elif ch == close_ch:
             depth -= 1
             if depth == 0:
-                candidate = cleaned[start:i + 1]
-                try:
-                    return json.loads(candidate)
-                except json.JSONDecodeError:
-                    # small models sometimes leave trailing commas
-                    fixed = re.sub(r",\s*([}\]])", r"\1", candidate)
-                    try:
-                        return json.loads(fixed)
-                    except json.JSONDecodeError as e:
-                        raise ValueError(f"could not parse JSON from model: {e}")
-    raise ValueError("unbalanced JSON in model output")
+                return i
+    return None
+
+
+def extract_json(text, expect="object"):
+    """Extract and parse the first JSON object or array from LLM output.
+
+    Args:
+        text: raw model output (may contain code fences or commentary)
+        expect: "object" or "array"
+
+    Returns the parsed Python object.
+
+    Commentary before the JSON may itself contain brackets ("use {name} for
+    ..."): a balanced span that is not valid JSON is skipped and the search
+    goes on AFTER it, never inside it, so a malformed object can't be
+    mistaken for one of its own members.
+
+    Raises ValueError if no balanced JSON of the expected kind is found.
+    """
+    cleaned = strip_code_fences(text)
+    open_ch, close_ch = ("{", "}") if expect == "object" else ("[", "]")
+    pos, failure = 0, None
+    while True:
+        start = cleaned.find(open_ch, pos)
+        if start == -1:
+            if failure:
+                raise ValueError(f"could not parse JSON from model: {failure}")
+            raise ValueError(f"no JSON {expect} found in model output")
+        end = _balanced_end(cleaned, start, open_ch, close_ch)
+        if end is None:
+            raise ValueError("unbalanced JSON in model output")
+        candidate = cleaned[start:end + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            # small models sometimes leave trailing commas
+            fixed = re.sub(r",\s*([}\]])", r"\1", candidate)
+            try:
+                return json.loads(fixed)
+            except json.JSONDecodeError as e:
+                failure = e
+        pos = end + 1
 
 
 def clean_llm_text(text, max_dropped=2):

@@ -31,6 +31,23 @@ def test_extract_json_braces_inside_strings():
     assert extract_json(raw)["summary"].startswith("the chapter")
 
 
+def test_extract_json_skips_brackets_in_commentary_before_the_json():
+    raw = 'Use {name} as the key. Here it is:\n{"title": "Foo"}'
+    assert extract_json(raw) == {"title": "Foo"}
+    assert extract_json('Items [see below] then [1, 2]', expect="array") == [1, 2]
+
+
+def test_extract_json_never_returns_a_member_of_a_malformed_object():
+    raw = '{"summary": "x" "events": [{"type": "death"}]}'
+    with pytest.raises(ValueError, match="could not parse"):
+        extract_json(raw)
+
+
+def test_extract_json_unclosed_object_is_unbalanced():
+    with pytest.raises(ValueError, match="unbalanced"):
+        extract_json('{"title": "Foo", "events": [')
+
+
 def test_extract_json_none_found():
     with pytest.raises(ValueError):
         extract_json("no json here at all", expect="object")
