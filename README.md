@@ -349,10 +349,12 @@ Then open <http://127.0.0.1:8000>.
   (`/?run=<id>`) you can send to yourself. A run whose server went away shows
   as **interrupted** and continues with *Resume book*; set
   `BOOKWRITER_AUTO_RESUME=1` to resume the newest one automatically at startup.
-- **Built for a phone.** One column under 780 px, 44 px+ tap targets, safe-area
-  insets for the notch and home bar, 16 px fields so iOS does not zoom on
-  focus, a bottom-sheet question dialog, and a log pane capped at 2 000 lines
-  so a long book cannot freeze Safari.
+- **Built for a phone.** Under 780 px: one column, the book list becomes a
+  native picker, 44 px+ tap targets, safe-area insets for the notch and home
+  bar, 16 px fields so iOS does not zoom on focus, a bottom-sheet question
+  dialog, long paths and JSON allowed to break inside the log instead of
+  scrolling sideways, and a log pane capped at 2 000 lines so a long book
+  cannot freeze Safari.
 - **The seed review works in the browser.** The prompts the CLI would print in
   the terminal are published as files (`<run>/ask/question.json`) and answered
   from the page; the page shows the recent log above each question. With

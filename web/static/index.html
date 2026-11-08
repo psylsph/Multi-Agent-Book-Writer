@@ -19,6 +19,8 @@
     --safe-right: env(safe-area-inset-right, 0px);
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  /* `label { display: block }` below would otherwise defeat the attribute */
+  [hidden] { display: none !important; }
   html { -webkit-text-size-adjust: 100%; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
@@ -57,6 +59,7 @@
     color: var(--muted); margin: 16px 0 8px;
   }
   aside h2:first-child { margin-top: 0; }
+  #run-select { display: none; }
   #run-list { list-style: none; margin: 0; padding: 0; }
   #run-list li {
     padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 4px;
@@ -117,7 +120,8 @@
     margin: 20px 0 10px;
   }
   .status-line h2 { margin: 0; font-size: 16px; text-transform: none;
-    letter-spacing: 0; color: var(--text); overflow-wrap: anywhere; }
+    letter-spacing: 0; color: var(--text); overflow-wrap: anywhere; min-width: 0; }
+  #run-meta { min-width: 0; overflow-wrap: anywhere; }
   .chapters { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
   .chapter {
     display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; gap: 10px;
@@ -125,7 +129,7 @@
   }
   .chapter:first-child { border-top: 0; }
   .chapter .n { color: var(--muted); font-family: ui-monospace, monospace; }
-  .chapter .title { overflow-wrap: anywhere; }
+  .chapter .title { min-width: 0; overflow-wrap: anywhere; }
   .chapter .st { font-size: 11px; color: var(--muted); white-space: nowrap; }
   .chapter .st.edited { color: var(--ok); }
   .chapter .st.drafted { color: var(--warn); }
@@ -135,7 +139,7 @@
     margin: 0; height: min(46vh, 420px); overflow: auto;
     background: #0f1115; border: 1px solid var(--line); border-radius: 10px;
     padding: 10px; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
-    white-space: pre-wrap; overflow-wrap: anywhere; color: #c9d1d9;
+    white-space: pre-wrap; overflow-wrap: normal; color: #c9d1d9;
     -webkit-overflow-scrolling: touch;
   }
   #files { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
@@ -167,19 +171,18 @@
     #config { display: none; }
     main { grid-template-columns: minmax(0, 1fr); min-height: 0; }
     aside {
-      border-right: 0; border-bottom: 1px solid var(--line); padding: 10px var(--pad-x);
-      position: sticky; top: calc(54px + var(--safe-top)); z-index: 2;
+      border-right: 0; border-bottom: 1px solid var(--line);
+      padding: 8px var(--pad-x); position: sticky;
+      top: calc(46px + var(--safe-top)); z-index: 2;
     }
-    aside h2 { margin: 0 0 8px; }
-    #run-list {
-      display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px;
-      scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch;
+    aside h2 { display: none; }
+    /* one native picker beats a horizontally scrolling chip strip on a phone */
+    #run-select { display: block; width: 100%; margin: 0; }
+    #run-list { display: none; }
+    header h1 {
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      min-width: 0; flex: 1 1 auto;
     }
-    #run-list li {
-      flex: 0 0 auto; max-width: 74vw; margin: 0; scroll-snap-align: start;
-      background: #1b1f26; border-color: var(--line); padding: 8px 12px;
-    }
-    #run-list .t { max-width: 60vw; }
     section { padding-top: 12px; }
     /* 16px stops iOS zooming the page when a field is focused */
     input, select, textarea, button { font-size: 16px; }
@@ -191,8 +194,15 @@
     .actions button { flex: 1 1 40%; }
     .status-line { margin-top: 16px; }
     .panes { grid-template-columns: minmax(0, 1fr); gap: 10px; }
-    #log { height: 42vh; min-height: 190px; font-size: 12px; }
+    /* narrow columns: let long paths and JSON break instead of scrolling sideways */
+    #log {
+      height: 42vh; min-height: 190px; font-size: 12px; line-height: 1.5;
+      overflow-wrap: anywhere; word-break: break-word; tab-size: 2;
+    }
     .chapter { grid-template-columns: 26px minmax(0, 1fr) auto; padding: 10px; }
+    .chapter .title, #run-meta, .status-line h2, #files a, #q-prompt,
+    #q-context, #model-note { overflow-wrap: anywhere; word-break: break-word; }
+    .chapter .title { white-space: normal; }
     dialog {
       position: fixed; inset: auto 0 0 0; margin: 0; width: 100%;
       max-width: 100%; max-height: 86vh; max-height: 86dvh; overflow: auto;
@@ -214,6 +224,7 @@
 <main>
   <aside>
     <h2>Books</h2>
+    <select id="run-select" aria-label="Choose a book"></select>
     <ul id="run-list"></ul>
   </aside>
   <section>
@@ -339,25 +350,54 @@ function setPill(state, exitCode) {
   }
 }
 
+function runLabel(run) {
+  const counts = run.counts || {};
+  if (run.state === 'running') return 'writing';
+  if (run.state === 'interrupted') return 'interrupted';
+  return `${counts.edited || 0}/${counts.planned || 0} edited`;
+}
+
 function renderRuns(runs) {
   const list = $('run-list');
+  const select = $('run-select');
   list.innerHTML = '';
+
+  if (!runs.length) {
+    list.innerHTML = '<li class="muted">No books yet. Paste a seed and start one.</li>';
+    select.innerHTML = '<option>No books yet</option>';
+    select.disabled = true;
+    select.dataset.signature = '';
+    return;
+  }
+
+  // The <select> is the phone view. Rebuild it only when a label or a state
+  // changed, so a refresh cannot close the picker while it is open.
+  const signature = runs.map((run) => {
+    const counts = run.counts || {};
+    return [run.id, run.title, run.state, counts.planned, counts.edited].join('~');
+  }).join('|');
+  if (select.dataset.signature !== signature) {
+    select.innerHTML = '';
+    for (const run of runs) {
+      const option = document.createElement('option');
+      option.value = run.id;
+      option.textContent = `${run.title || run.id} — ${runLabel(run)}`;
+      select.appendChild(option);
+    }
+    select.dataset.signature = signature;
+  }
+  select.disabled = (runs.length < 2);
+  if (selected && runs.some((run) => run.id === selected)) select.value = selected;
+
   for (const run of runs) {
     const li = document.createElement('li');
     li.className = run.id === selected ? 'active' : '';
-    const counts = run.counts || {};
-    const label = run.state === 'running' ? 'writing'
-      : run.state === 'interrupted' ? 'interrupted'
-      : `${counts.edited || 0}/${counts.planned || 0} edited`;
     li.innerHTML = `<span class="t"><span class="dot ${run.state || ''}"></span></span>
                     <span class="s"></span>`;
     li.querySelector('.t').append(document.createTextNode(run.title || run.id));
-    li.querySelector('.s').textContent = label;
+    li.querySelector('.s').textContent = runLabel(run);
     li.onclick = () => selectRun(run.id);
     list.appendChild(li);
-  }
-  if (!runs.length) {
-    list.innerHTML = '<li class="muted">No books yet. Paste a seed and start one.</li>';
   }
 }
 
@@ -412,7 +452,8 @@ function renderStatus(status) {
   };
   files.appendChild(epub);
 
-  $('resume').disabled = status.state === 'running' || !status.counts.planned;
+  // an interrupted run may have no outline yet: it still needs resuming
+  $('resume').disabled = status.state === 'running' || status.state === 'new';
   $('stop').disabled = status.state !== 'running';
 }
 
@@ -533,6 +574,11 @@ async function loadModels() {
     ? `listing models failed: ${data.error}`
     : `${models.length} models · ${data.url}`;
 }
+
+$('run-select').onchange = () => {
+  const runId = $('run-select').value;
+  if (runId) selectRun(runId);
+};
 
 $('model').onchange = () => {
   const custom = $('model').value === '__custom__';
