@@ -56,6 +56,12 @@ multi-agent-book-writer/
 ├── seeds/
 │   ├── SEED_SCHEMA.md      # seed format reference
 │   └── example_seed.md     # example seed prompt (a fantasy mystery)
+├── web/                    # optional web GUI (extra: fastapi + uvicorn)
+│   ├── app.py              # HTTP API: one main.py subprocess per book
+│   ├── static/index.html   # the page (no build step)
+│   └── __init__.py
+├── Dockerfile              # CLI + web GUI image
+├── docker-compose.yml      # app (+ optional SearXNG sidecar), books on the host
 ├── tests/                  # offline tests; fake_llm.py is an in-process fake server
 ├── ROADMAP.md              # what is planned and what is known to be missing
 ├── output/                 # generated books, run state, interim progress artifacts
@@ -108,6 +114,9 @@ multi-agent-book-writer/
    ```bash
    uv sync    # install uv first: https://docs.astral.sh/uv/
    ```
+
+   Add `--extra web` (`uv sync --extra web`) if you want the optional
+   [web GUI](#web-gui-optional). The CLI does not need it.
 
 ## Usage
 
@@ -311,6 +320,103 @@ generated cover is an SVG, which Kindle and some other apps handle poorly, so
 supply a JPEG or PNG with `--cover` if the cover matters. To send a book to a Kindle,
 use Amazon's Send to Kindle, which accepts EPUB. Review the whole book once before
 publishing it; the pipeline's checks reduce errors but cannot remove them.
+
+## Web GUI (optional)
+
+`web/` is a small FastAPI page for starting a book, watching the chapters and
+log arrive, downloading the result, and **answering the seed review's questions
+in the browser**. It is an optional extra (`fastapi` + `uvicorn`); the CLI never
+imports it.
+
+```bash
+uv sync --extra web
+uv run --extra web uvicorn web.app:app --host 127.0.0.1 --port 8000
+```
+
+Then open <http://127.0.0.1:8000>.
+
+- **Each book is its own process.** The GUI starts `main.py` as a subprocess
+  with a directory of its own (`output/web/<run>/`: `config.yaml`, `state/`,
+  `chapters/`, and the web layer's `job/` with its seed, journal, log and
+  questions). A crash or a stop cannot take the server down, the pipeline's
+  global config/context/stats stay per-run, and the CLI remains the only
+  implementation of a run.
+- **Persistent, so any device can pick the book up.** The run's state is its
+  directory on disk, not the server's memory: `job/job.json` says whether it is
+  running (pid + its command line), `job/exit.json` records how it ended, and
+  the log is a file. Reload the page on a phone, or restart the server, and the
+  run list, chapters and log are all there. Each book has a URL
+  (`/?run=<id>`) you can send to yourself. A run whose server went away shows
+  as **interrupted** and continues with *Resume book*; set
+  `BOOKWRITER_AUTO_RESUME=1` to resume the newest one automatically at startup.
+- **Built for a phone.** One column under 780 px, 44 px+ tap targets, safe-area
+  insets for the notch and home bar, 16 px fields so iOS does not zoom on
+  focus, a bottom-sheet question dialog, and a log pane capped at 2 000 lines
+  so a long book cannot freeze Safari.
+- **The seed review works in the browser.** The prompts the CLI would print in
+  the terminal are published as files (`<run>/ask/question.json`) and answered
+  from the page; the page shows the recent log above each question. With
+  `book.seed_review: ask` a run really does wait for you. An unanswered
+  question falls back to its suggestion after `BOOKWRITER_ASK_TIMEOUT` seconds
+  (default 900), the same way a closed terminal does.
+- **Stop saves the run.** It sends SIGINT — what Ctrl-C sends — so the partial
+  book is saved and *Resume this book* continues from the last finished
+  chapter. *Build EPUB* runs `make_epub.py` for the selected book.
+- **One book at a time, and no authentication.** Bind it to `127.0.0.1`. More
+  than that needs real job isolation and auth, not this page.
+
+## Docker
+
+The image contains the CLI and the web GUI. `config.yaml`, `seeds/` and
+`output/` stay on the host.
+
+```bash
+cp config.example.yaml config.yaml   # once, then edit llm.base_url / llm.model
+docker compose up --build            # http://localhost:8000
+```
+
+**Port 8000 is published on every interface** (`8000:8000`) and the page has no
+authentication: use it on a trusted network, or put a reverse proxy with auth in
+front of it, or change the mapping back to `127.0.0.1:8000:8000`.
+
+Two things differ from running on the host:
+
+- **The LLM endpoint must be reachable from inside the container.** A server on
+  the host (llama.cpp, LM Studio, vLLM, Ollama) is not on `localhost` there.
+  Either set `llm.base_url: "http://host.docker.internal:8080"` in `config.yaml`,
+  or leave your config alone and override it for every run:
+
+  ```bash
+  BOOKWRITER_LLM_BASE_URL=http://host.docker.internal:8080 docker compose up --build
+  ```
+
+  `host.docker.internal` is mapped to the host by `extra_hosts` in
+  `docker-compose.yml`. To make it stick, put
+  `BOOKWRITER_LLM_BASE_URL=http://host.docker.internal:8080` in a `.env` file
+  next to `docker-compose.yml` (compose reads it, and `.env` is gitignored). A hosted API needs neither, and `llm.api_key:
+  "env:LLM_API_KEY"` with `export LLM_API_KEY=...` before `up` works as usual.
+- **SearXNG: reuse the one you already run, or use the bundled sidecar.** The
+  app never mounts the Docker socket. Either:
+  - **reuse an existing container.** `docker-compose.yml` attaches the app to
+    the external `searxng-net` network and `.env` sets
+    `BOOKWRITER_SEARXNG_URL=http://searxng:8080`. SearXNG must serve the JSON
+    API, so its `settings.yml` needs `search.formats: [html, json]`; without it
+    every search fails with HTTP 403 (the log says so). If that network does not
+    exist on your machine, either `docker network create searxng-net` or delete
+    the `networks:` block from `docker-compose.yml`.
+  - **or run the bundled sidecar.** Set `web_search.auto_start: "no"`, keep
+    `BOOKWRITER_SEARXNG_URL=http://searxng:8080` (the sidecar's service name on
+    the project network) and start it with
+    `docker compose --profile search up --build`.
+
+The same image runs the CLI:
+
+```bash
+docker compose run --rm app python main.py --demo
+```
+
+Books land in `./output` (each web run in `./output/web/<run>/`) owned by you:
+compose runs the container as `${UID}:${GID}`.
 
 ## Resume
 
@@ -723,6 +829,7 @@ Dependencies are declared in `pyproject.toml` (Python 3.11+):
 
 - `requests`: HTTP client for the OpenAI-compatible chat API
 - `PyYAML`: config loading
+- optional `web` extra: `fastapi` + `uvicorn` for the web GUI
 
 ## License
 

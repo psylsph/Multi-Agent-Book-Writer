@@ -10,7 +10,8 @@ section there before changing user-visible behaviour.
 A CLI that turns a seed prompt (premise, characters, world, optional outline) into
 a drafted, reviewed and polished book, using any OpenAI-compatible chat endpoint
 (llama.cpp, LM Studio, vLLM, Ollama, OpenAI, OpenRouter). Plain Python 3.11+,
-sequential pipeline, two runtime dependencies (`requests`, `PyYAML`).
+sequential pipeline, two runtime dependencies (`requests`, `PyYAML`). An optional
+`web` extra (`fastapi`, `uvicorn`) adds a browser GUI; the CLI never imports it.
 
 ## Commands
 
@@ -20,10 +21,13 @@ uv run pytest -q           # full suite: offline, ~1s, no LLM/network/Docker
 uv run ruff check .        # lint (bug-catching rules only; CI runs it)
 uv run main.py --help      # the pipeline CLI
 uv run make_epub.py --help # finished chapters -> EPUB (no LLM)
+uv run --extra web uvicorn web.app:app --port 8000   # web GUI
+uv sync --extra web        # ... needs the optional extra
 ```
 
-CI (`.github/workflows/tests.yml`) runs `uv sync --locked`, ruff, then pytest on
-Python 3.11, 3.12 and 3.13. Keep `uv.lock` in sync: add dependencies with
+CI (`.github/workflows/tests.yml`) runs `uv sync --locked --extra web`, ruff,
+then pytest on Python 3.11, 3.12 and 3.13 (the extra is installed so the web
+GUI tests are not skipped). Keep `uv.lock` in sync: add dependencies with
 `uv add` and prefer the standard library.
 
 ## Layout and pipeline
@@ -57,6 +61,10 @@ tools/             offline-from-the-pipeline evaluation harnesses (reviewer, ext
                    verdict) run against real models; not part of a book run
 tests/             pytest; tests/fake_llm.py is an in-process fake OpenAI server
 seeds/             SEED_SCHEMA.md (format) and example_seed.md
+web/               optional GUI: app.py runs one `main.py` subprocess per book
+                   (own output dir; job/ holds its journal, seed, log, questions,
+                   child.py records the exit status), static/index.html is the page
+Dockerfile         CLI + web GUI image; docker-compose.yml mounts config/output
 ```
 
 Flow: `seed_review -> architect -> planner -> researcher -> writer -> editor`,
@@ -69,6 +77,13 @@ written, edited and has its story state re-extracted before the next is drafted.
 
 ## Invariants - do not break these
 
+- **Interactive prompts go through `shared/webanswer.py`.** The seed review
+  (`agents/seed_review.py`'s `_ask(question, default)`) and the SearXNG offer
+  (`shared/web_search.py`'s `_ask`) are the only two stdin seams, and
+  `webanswer.install_if_enabled()` (called first in `main.main()`) swaps both for
+  a browser file handshake when `BOOKWRITER_ASK_DIR` is set. A new `input()`
+  anywhere would hang a web run; add a seam and install it there instead. A
+  prompt must degrade on EOF/timeout (default, or stop asking), never loop.
 - **All LLM calls go through `shared/llm_client.py`** (`generate`,
   `generate_with_wait`, `generate_prose`). Pass the right `agent=` name: it selects
   per-agent model, temperature, max_tokens, reasoning effort and stats bucket.

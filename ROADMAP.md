@@ -40,7 +40,12 @@ documenting) when it ships.
 
 ### Output
 - [ ] **PDF export** (pandoc). EPUB is done: `make_epub.py` (see the README).
-- [ ] **Streamlit UI** for monitoring a run and editing seeds.
+- [x] **Web GUI** for starting a run, watching it and answering the seed
+  review's questions: `web/` (FastAPI, one `main.py` subprocess per book) and
+  the Docker image. Shipped: see the README. Runs survive a server restart
+  (on-disk journal, interrupt/resume, optional auto-resume) and the page is
+  phone-first. No seed *editing* yet beyond the text box and the review's own
+  questions, one book at a time, and no authentication.
 - [ ] **Character-voice conditioning** per point-of-view chapter.
 
 ### Engineering

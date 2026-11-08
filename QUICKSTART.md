@@ -173,6 +173,29 @@ no API key). Queries never include character names and are logged to
 - The startup preflight lists the models your server offers; set `llm.model`
   in config.yaml or pass `--model <name>`
 
+## Optional: web GUI and Docker
+
+A browser page for starting a book, watching the log and chapters arrive, and
+answering the seed review's questions (optional extra: `fastapi`, `uvicorn`):
+
+```bash
+uv sync --extra web
+uv run --extra web uvicorn web.app:app --host 127.0.0.1 --port 8000
+# then open http://127.0.0.1:8000
+```
+
+The whole thing also runs in Docker, with `config.yaml`, `seeds/` and `output/`
+on the host:
+
+```bash
+cp config.example.yaml config.yaml      # once; set llm.base_url
+# inside the container a host server is http://host.docker.internal:8080
+docker compose up --build               # http://127.0.0.1:8000
+docker compose --profile search up      # ... plus SearXNG on :8888
+```
+
+See [Web GUI and Docker](README.md#web-gui-optional) in the README.
+
 ## Output
 
 Your finished book is saved in `output/draft.md` (plus
