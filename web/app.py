@@ -723,7 +723,10 @@ async def api_events(run_id: str, since: int = 0):
 @app.get("/api/runs/{run_id}/question")
 def api_question(run_id: str):
     job = _job(run_id)
-    question = webanswer.read_question(job.control / ASK)
+    # A question file outlives the child that asked it (a crash leaves it
+    # behind), but only a live child can consume the answer: hide it otherwise.
+    question = (webanswer.read_question(job.control / ASK)
+                if job.running else None)
     if not question:
         return {"pending": None}
     lines, _ = job.snapshot()
@@ -733,6 +736,8 @@ def api_question(run_id: str):
 @app.post("/api/runs/{run_id}/answer")
 def api_answer(run_id: str, request: AnswerRequest):
     job = _job(run_id)
+    if not job.running:
+        raise HTTPException(409, "that run is not running; resume it first")
     question = webanswer.read_question(job.control / ASK)
     if not question:
         raise HTTPException(409, "there is no pending question")

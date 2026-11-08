@@ -116,9 +116,11 @@ def test_only_one_book_is_written_at_a_time(web, monkeypatch):
     assert web.spawned == []
 
 
-def test_a_question_is_relayed_and_answered(web):
+def test_a_question_is_relayed_and_answered(web, monkeypatch):
     run_id = start(web)
     job = web.module._job(run_id)
+    job.pid = 4242
+    monkeypatch.setattr(web.module, "_running", lambda pid, run_id: True)
     asked = webanswer.write_question(job.control / "ask", "  > ",
                                      default="d", kind="seed_review")
 
@@ -134,9 +136,11 @@ def test_a_question_is_relayed_and_answered(web):
     assert web.client.get(f"/api/runs/{run_id}/question").json()["pending"] is None
 
 
-def test_answering_a_stale_question_is_refused(web):
+def test_answering_a_stale_question_is_refused(web, monkeypatch):
     run_id = start(web)
     job = web.module._job(run_id)
+    job.pid = 4242
+    monkeypatch.setattr(web.module, "_running", lambda pid, run_id: True)
     asked = webanswer.write_question(job.control / "ask", ">")
     response = web.client.post(f"/api/runs/{run_id}/answer",
                                json={"id": "not-the-question", "answer": "x"})
@@ -144,8 +148,10 @@ def test_answering_a_stale_question_is_refused(web):
     assert webanswer.read_answer(job.control / "ask", asked["id"]) is None
 
 
-def test_answering_with_nothing_pending_is_refused(web):
+def test_answering_with_nothing_pending_is_refused(web, monkeypatch):
     run_id = start(web)
+    web.module._job(run_id).pid = 4242
+    monkeypatch.setattr(web.module, "_running", lambda pid, run_id: True)
     response = web.client.post(f"/api/runs/{run_id}/answer",
                                json={"id": "abc", "answer": "x"})
     assert response.status_code == 409
@@ -436,6 +442,20 @@ class FakeModels:
         if self.error:
             raise AssertionError("should not be parsed")
         return self.payload
+
+
+def test_a_question_from_a_dead_run_is_not_shown(web):
+    """The question file stays after a crash, but nothing can consume the
+    answer, so the page must not pop a dead dialog (and answering is refused)."""
+    run_id = start(web)
+    job = web.module._job(run_id)
+    asked = webanswer.write_question(job.control / "ask", ">", default="d")
+
+    assert web.client.get(f"/api/runs/{run_id}/question").json()["pending"] is None
+    response = web.client.post(f"/api/runs/{run_id}/answer",
+                               json={"id": asked["id"], "answer": "x"})
+    assert response.status_code == 409
+    assert webanswer.read_answer(job.control / "ask", asked["id"]) is None
 
 
 def test_models_lists_what_the_endpoint_offers(web, monkeypatch):
