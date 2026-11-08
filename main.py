@@ -22,7 +22,7 @@ from agents.seed_review import run_seed_review
 from agents.researcher import run_researcher
 from agents.writer import refresh_state, run_writer
 from agents.editor import finalize_book, run_editor, save_book
-from shared import llm_client, runlog, web_search
+from shared import llm_client, runlog, web_search, webanswer
 from shared.context import get_context, reset_context, update_context
 from shared.llm_client import EndpointUnavailable, agent_enabled, \
     get_config, load_config, preflight
@@ -459,6 +459,9 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None,
 
 
 def main():
+    # The web GUI has no terminal: answer its prompts through files instead
+    # (no-op unless BOOKWRITER_ASK_DIR is set).
+    webanswer.install_if_enabled()
     parser = argparse.ArgumentParser(
         description="Multi-agent book writer: feed a seed prompt with "
                     "characters, world and outline; get a drafted book.")

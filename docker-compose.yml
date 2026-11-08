@@ -1,0 +1,62 @@
+# Web GUI + pipeline in one container, with the books and config on the host.
+#
+#   cp config.example.yaml config.yaml     # once, then edit it
+#   docker compose up --build              # http://127.0.0.1:8000
+#   docker compose --profile search up     # ... plus SearXNG on :8888
+#
+# Inside the container, the LLM server on the host is host.docker.internal.
+# For llama.cpp/LM Studio/vLLM on the host, set in config.yaml:
+#
+#   llm:
+#     base_url: "http://host.docker.internal:8080"
+#
+# A hosted API (OpenAI/OpenRouter) needs no extra_hosts change; put the key in
+# llm.api_key: "env:LLM_API_KEY" and export LLM_API_KEY before `up`.
+#
+# Set web_search.auto_start: "no" and web_search.searxng_url:
+# "http://searxng:8080" when using the search sidecar: running Docker inside
+# this container (mounting the socket) is not needed and not wanted.
+
+services:
+  app:
+    build: .
+    # match the host user, so the books written into ./output are yours
+    user: "${UID:-1000}:${GID:-1000}"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./output:/app/output
+      - ./seeds:/app/seeds:ro
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      LLM_API_KEY: "${LLM_API_KEY:-}"
+      BOOKWRITER_CONFIG: /app/config.yaml
+      BOOKWRITER_WEB_OUTPUT: /app/output/web
+      # set to http://host.docker.internal:<port> to reach an LLM server on
+      # the host without editing config.yaml (see README, Docker)
+      BOOKWRITER_LLM_BASE_URL: "${BOOKWRITER_LLM_BASE_URL:-}"
+      # e.g. http://searxng:8080 (see README, Docker)
+      BOOKWRITER_SEARXNG_URL: "${BOOKWRITER_SEARXNG_URL:-}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # reach an existing SearXNG container (BOOKWRITER_SEARXNG_URL), without
+    # publishing its port or mounting the Docker socket
+    networks:
+      - default
+      - searxng
+    restart: unless-stopped
+
+  searxng:
+    image: searxng/searxng:latest
+    profiles: ["search"]
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      - ./searxng:/etc/searxng
+    restart: unless-stopped
+
+networks:
+  # the SearXNG container already running on this machine (docker network ls)
+  searxng:
+    external: true
+    name: searxng-net

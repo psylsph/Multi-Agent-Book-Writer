@@ -1,0 +1,606 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14161a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Multi-Agent Book Writer</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1b1e24; --line: #2b3038; --text: #e6e8eb;
+    --muted: #98a1af; --accent: #7aa2f7; --ok: #7dcfa0; --warn: #e0af68;
+    --bad: #f7768e;
+    --pad-x: 18px;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding-bottom: var(--safe-bottom);
+    overflow-x: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 12px calc(var(--pad-x) + var(--safe-right)) 12px
+             calc(var(--pad-x) + var(--safe-left));
+    border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 3; padding-top: calc(12px + var(--safe-top));
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .small { font-size: 11px; }
+  .pill {
+    font-size: 11px; padding: 3px 10px; border-radius: 999px;
+    background: var(--line); color: var(--muted); text-transform: uppercase;
+    letter-spacing: .5px; white-space: nowrap;
+  }
+  .pill.running { background: #2b3a2f; color: var(--ok); }
+  .pill.done { background: #26303d; color: var(--accent); }
+  .pill.failed { background: #3a2a2e; color: var(--bad); }
+  .pill.interrupted { background: #3a3326; color: var(--warn); }
+  #config { margin-left: auto; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; max-width: 46vw; }
+  main {
+    display: grid; grid-template-columns: 250px minmax(0, 1fr);
+    min-height: calc(100vh - 54px);
+  }
+  aside { border-right: 1px solid var(--line); padding: 14px; background: #171a1f; }
+  aside h2, section h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .8px;
+    color: var(--muted); margin: 16px 0 8px;
+  }
+  aside h2:first-child { margin-top: 0; }
+  #run-list { list-style: none; margin: 0; padding: 0; }
+  #run-list li {
+    padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 4px;
+    border: 1px solid transparent; min-height: 44px;
+  }
+  #run-list li:hover { background: #1f242b; }
+  #run-list li.active { background: #232b38; border-color: #34425a; }
+  #run-list .t {
+    display: block; font-size: 13px; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #run-list .s { display: block; font-size: 11px; color: var(--muted); }
+  #run-list .dot {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--muted); margin-right: 5px; vertical-align: middle;
+  }
+  #run-list .dot.running { background: var(--ok); }
+  #run-list .dot.interrupted { background: var(--warn); }
+  #run-list .dot.finished { background: var(--accent); }
+  section {
+    padding: 16px calc(var(--pad-x) + var(--safe-right)) 48px
+             calc(var(--pad-x) + var(--safe-left));
+    min-width: 0;
+  }
+  form { background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+  textarea, input, select {
+    width: 100%; margin-top: 5px; background: #12141a; color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px 11px;
+    font: inherit;
+  }
+  textarea {
+    resize: vertical; min-height: 130px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+  }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+  .row > label { flex: 1 1 130px; margin-bottom: 0; }
+  label.check { display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
+    min-height: 44px; }
+  label.check input { width: auto; margin: 0; }
+  button {
+    background: var(--accent); color: #0e1116; border: 0; border-radius: 8px;
+    padding: 11px 16px; font: inherit; font-weight: 600; cursor: pointer;
+    min-height: 44px;
+  }
+  button:disabled { opacity: .4; cursor: default; }
+  button.secondary { background: #2b3038; color: var(--text); }
+  button.danger { background: var(--bad); color: #1a0d10; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+  #error {
+    display: none; margin-top: 10px; padding: 9px 11px; border-radius: 8px;
+    background: #3a2a2e; color: #ffd6dd; font-size: 13px;
+  }
+  #model-note { display: block; margin-top: 5px; }
+  .status-line {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    margin: 20px 0 10px;
+  }
+  .status-line h2 { margin: 0; font-size: 16px; text-transform: none;
+    letter-spacing: 0; color: var(--text); overflow-wrap: anywhere; }
+  .chapters { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .chapter {
+    display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; gap: 10px;
+    padding: 10px 12px; border-top: 1px solid var(--line); align-items: center;
+  }
+  .chapter:first-child { border-top: 0; }
+  .chapter .n { color: var(--muted); font-family: ui-monospace, monospace; }
+  .chapter .title { overflow-wrap: anywhere; }
+  .chapter .st { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .chapter .st.edited { color: var(--ok); }
+  .chapter .st.drafted { color: var(--warn); }
+  .panes { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 14px;
+    margin-top: 18px; }
+  #log {
+    margin: 0; height: min(46vh, 420px); overflow: auto;
+    background: #0f1115; border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap; overflow-wrap: anywhere; color: #c9d1d9;
+    -webkit-overflow-scrolling: touch;
+  }
+  #files { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  #files h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .8px;
+    color: var(--muted); margin: 0 0 8px; }
+  #files a { display: block; color: var(--accent); text-decoration: none;
+    font-size: 13px; padding: 6px 0; overflow-wrap: anywhere; }
+  #files a:hover { text-decoration: underline; }
+  dialog {
+    background: var(--panel); color: var(--text); border: 1px solid #3a4350;
+    border-radius: 12px; width: min(680px, 92vw); padding: 0;
+    max-height: 88vh; max-height: 88dvh; overflow: auto;
+  }
+  dialog::backdrop { background: rgba(0,0,0,.62); }
+  dialog .inner { padding: 18px 20px calc(18px + var(--safe-bottom)); }
+  dialog h3 { margin: 0 0 4px; font-size: 16px; }
+  dialog pre {
+    max-height: 150px; overflow: auto; background: #0f1115;
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px;
+    font-size: 12px; white-space: pre-wrap; color: var(--muted);
+  }
+  #q-prompt { font-weight: 600; overflow-wrap: anywhere; }
+
+  /* iPhone / narrow screens: one column, thumb-sized controls, no zoom on focus */
+  @media (max-width: 780px) {
+    :root { --pad-x: 14px; }
+    header { gap: 8px; }
+    header h1 { font-size: 14px; }
+    #config { display: none; }
+    main { grid-template-columns: minmax(0, 1fr); min-height: 0; }
+    aside {
+      border-right: 0; border-bottom: 1px solid var(--line); padding: 10px var(--pad-x);
+      position: sticky; top: calc(54px + var(--safe-top)); z-index: 2;
+    }
+    aside h2 { margin: 0 0 8px; }
+    #run-list {
+      display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px;
+      scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch;
+    }
+    #run-list li {
+      flex: 0 0 auto; max-width: 74vw; margin: 0; scroll-snap-align: start;
+      background: #1b1f26; border-color: var(--line); padding: 8px 12px;
+    }
+    #run-list .t { max-width: 60vw; }
+    section { padding-top: 12px; }
+    /* 16px stops iOS zooming the page when a field is focused */
+    input, select, textarea, button { font-size: 16px; }
+    textarea { min-height: 116px; }
+    .row { display: block; }
+    .row > label { margin-bottom: 12px; }
+    label.check { min-height: 44px; margin-bottom: 4px; }
+    .actions { gap: 8px; }
+    .actions button { flex: 1 1 40%; }
+    .status-line { margin-top: 16px; }
+    .panes { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+    #log { height: 42vh; min-height: 190px; font-size: 12px; }
+    .chapter { grid-template-columns: 26px minmax(0, 1fr) auto; padding: 10px; }
+    dialog {
+      position: fixed; inset: auto 0 0 0; margin: 0; width: 100%;
+      max-width: 100%; max-height: 86vh; max-height: 86dvh; overflow: auto;
+      border-radius: 16px 16px 0 0;
+      border-left: 0; border-right: 0; border-bottom: 0;
+    }
+    dialog .inner { padding: 16px var(--pad-x) calc(16px + var(--safe-bottom)); }
+    dialog pre { max-height: 22vh; }
+    .actions button { min-height: 48px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Multi-Agent Book Writer</h1>
+  <span id="pill" class="pill">idle</span>
+  <span id="config" class="muted"></span>
+</header>
+<main>
+  <aside>
+    <h2>Books</h2>
+    <ul id="run-list"></ul>
+  </aside>
+  <section>
+    <form id="new-run">
+      <label>Seed prompt
+        <textarea id="seed" placeholder="Premise, characters, world, optional outline..."></textarea>
+      </label>
+      <div class="row">
+        <label>Chapters
+          <input id="chapters" type="number" min="1" inputmode="numeric" placeholder="auto">
+        </label>
+        <label>Model
+          <select id="model"></select>
+          <span id="model-note" class="muted small"></span>
+        </label>
+        <label>Seed review
+          <select id="seed-review">
+            <option value="">from config</option>
+            <option value="ask">ask</option>
+            <option value="warn">warn</option>
+            <option value="off">off</option>
+          </select>
+        </label>
+        <label class="check"><input id="plan-only" type="checkbox"> plan only</label>
+      </div>
+      <label id="model-custom-wrap" hidden>Custom model name
+        <input id="model-custom" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="model id">
+      </label>
+      <div class="actions">
+        <button type="submit" id="start">Start book</button>
+        <button type="button" id="resume" class="secondary" disabled>Resume book</button>
+        <button type="button" id="stop" class="danger" disabled>Stop</button>
+      </div>
+      <div id="error"></div>
+    </form>
+
+    <div class="status-line">
+      <h2 id="run-title">No book selected</h2>
+      <span id="run-meta" class="muted"></span>
+    </div>
+    <div id="chapter-list" class="chapters"></div>
+
+    <div class="panes">
+      <pre id="log"></pre>
+      <div id="files"><h3>Files</h3><div id="file-list" class="muted">none yet</div></div>
+    </div>
+  </section>
+</main>
+
+<dialog id="question">
+  <div class="inner">
+    <h3>The writer has a question</h3>
+    <p class="muted small" id="q-kind"></p>
+    <pre id="q-context"></pre>
+    <p id="q-prompt"></p>
+    <input id="q-answer" autocomplete="off" enterkeyhint="send"
+           placeholder="Your answer, or leave empty for the suggestion">
+    <div class="actions">
+      <button id="q-send">Answer</button>
+      <button id="q-default" class="secondary">Use the suggestion</button>
+    </div>
+    <div id="q-error" class="muted small"></div>
+  </div>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const MAX_LOG_LINES = 2000;   // a long book must not freeze a phone
+let selected = null;
+let source = null;
+let logLines = 0;
+let dialogFor = null;
+let busy = false;
+
+function showError(message) {
+  const el = $('error');
+  el.textContent = message || '';
+  el.style.display = message ? 'block' : 'none';
+}
+
+async function api(path, options) {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...(options || {}),
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (_) {}
+    throw new Error(detail);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+function fmtElapsed(seconds) {
+  if (seconds == null) return '';
+  const m = Math.floor(seconds / 60);
+  if (m >= 60) return `${Math.floor(m / 60)} h ${m % 60} min`;
+  return m > 0 ? `${m} min` : `${Math.round(seconds)} s`;
+}
+
+function fmtAgo(timestamp) {
+  if (!timestamp) return '';
+  const seconds = Math.max(0, Math.round((Date.now() / 1000) - timestamp));
+  if (seconds < 90) return `${seconds}s ago`;
+  const m = Math.round(seconds / 60);
+  return m < 90 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
+}
+
+function setPill(state, exitCode) {
+  const pill = $('pill');
+  pill.className = 'pill';
+  if (!state || state === 'new') { pill.textContent = 'idle'; return; }
+  if (state === 'running') {
+    pill.textContent = 'writing'; pill.classList.add('running');
+  } else if (state === 'finished' && exitCode) {
+    pill.textContent = 'stopped'; pill.classList.add('failed');
+  } else if (state === 'finished') {
+    pill.textContent = 'finished'; pill.classList.add('done');
+  } else if (state === 'interrupted') {
+    pill.textContent = 'interrupted'; pill.classList.add('interrupted');
+  } else {
+    pill.textContent = state; pill.classList.add('failed');
+  }
+}
+
+function renderRuns(runs) {
+  const list = $('run-list');
+  list.innerHTML = '';
+  for (const run of runs) {
+    const li = document.createElement('li');
+    li.className = run.id === selected ? 'active' : '';
+    const counts = run.counts || {};
+    const label = run.state === 'running' ? 'writing'
+      : run.state === 'interrupted' ? 'interrupted'
+      : `${counts.edited || 0}/${counts.planned || 0} edited`;
+    li.innerHTML = `<span class="t"><span class="dot ${run.state || ''}"></span></span>
+                    <span class="s"></span>`;
+    li.querySelector('.t').append(document.createTextNode(run.title || run.id));
+    li.querySelector('.s').textContent = label;
+    li.onclick = () => selectRun(run.id);
+    list.appendChild(li);
+  }
+  if (!runs.length) {
+    list.innerHTML = '<li class="muted">No books yet. Paste a seed and start one.</li>';
+  }
+}
+
+function renderStatus(status) {
+  setPill(status.state, status.exit_code);
+  $('run-title').textContent = status.title || status.id;
+  const counts = status.counts || {};
+  const bits = [`${counts.planned} chapters`, `${counts.drafted} drafted`,
+                `${counts.edited} edited`];
+  if (status.elapsed) bits.push(fmtElapsed(status.elapsed));
+  if (status.state === 'running' && status.last_output) {
+    bits.push(`output ${fmtAgo(status.last_output)}`);
+  }
+  $('run-meta').textContent = bits.join(' · ');
+
+  const chapters = $('chapter-list');
+  chapters.innerHTML = '';
+  if (!status.chapters || !status.chapters.length) {
+    chapters.innerHTML = '<div class="chapter"><span></span><span class="muted">' +
+      'The outline is not ready yet.</span><span></span></div>';
+  }
+  for (const chapter of status.chapters || []) {
+    const row = document.createElement('div');
+    row.className = 'chapter';
+    const label = chapter.edited ? 'edited'
+      : chapter.drafted ? 'drafted'
+      : chapter.researched ? 'researched' : 'planned';
+    row.innerHTML = `<span class="n"></span><span class="title"></span>
+                     <span class="st ${label}"></span>`;
+    row.querySelector('.n').textContent = chapter.number;
+    row.querySelector('.title').textContent = chapter.title || '';
+    row.querySelector('.st').textContent = label;
+    chapters.appendChild(row);
+  }
+
+  const files = $('file-list');
+  files.innerHTML = '';
+  if (!status.files || !status.files.length) files.textContent = 'none yet';
+  for (const file of status.files || []) {
+    const link = document.createElement('a');
+    link.href = `/api/runs/${status.id}/file?path=${encodeURIComponent(file.path)}`;
+    link.textContent = file.path;
+    files.appendChild(link);
+  }
+  const epub = document.createElement('a');
+  epub.href = '#';
+  epub.textContent = 'build EPUB';
+  epub.onclick = async (event) => {
+    event.preventDefault();
+    try { await api(`/api/runs/${status.id}/epub`, { method: 'POST' }); refresh(); }
+    catch (err) { showError(err.message); }
+  };
+  files.appendChild(epub);
+
+  $('resume').disabled = status.state === 'running' || !status.counts.planned;
+  $('stop').disabled = status.state !== 'running';
+}
+
+function appendLog(line) {
+  const log = $('log');
+  const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
+  log.textContent += (log.textContent ? '\n' : '') + line;
+  logLines += 1;
+  if (logLines > MAX_LOG_LINES) {
+    log.textContent = log.textContent.split('\n').slice(-MAX_LOG_LINES).join('\n');
+    logLines = MAX_LOG_LINES;
+  }
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+function connectLog(runId) {
+  if (source) source.close();
+  logLines = 0;
+  $('log').textContent = '';
+  source = new EventSource(`/api/runs/${runId}/events?since=0`);
+  source.onmessage = (event) => appendLog(JSON.parse(event.data));
+  source.addEventListener('done', () => { source.close(); refresh(); });
+}
+
+function rememberRun(runId) {
+  const url = new URL(window.location.href);
+  if (runId) url.searchParams.set('run', runId);
+  else url.searchParams.delete('run');
+  history.replaceState(null, '', url);
+}
+
+async function selectRun(runId) {
+  selected = runId;
+  rememberRun(runId);
+  connectLog(runId);
+  await refresh();
+}
+
+async function refresh() {
+  try {
+    const data = await api('/api/runs');
+    renderRuns(data.runs || []);
+    $('start').disabled = (data.live || []).length > 0;
+    if (selected) {
+      renderStatus(await api(`/api/runs/${selected}`));
+      await checkQuestion();
+    } else {
+      setPill(null);
+      $('resume').disabled = true;
+      $('stop').disabled = true;
+    }
+  } catch (err) { showError(err.message); }
+}
+
+async function checkQuestion() {
+  if (!selected) return;
+  const data = await api(`/api/runs/${selected}/question`);
+  const dialog = $('question');
+  if (!data.pending) {
+    if (dialog.open) dialog.close();
+    dialogFor = null;
+    return;
+  }
+  if (dialog.open && dialogFor === data.pending.id) return;
+  dialogFor = data.pending.id;
+  $('q-kind').textContent = data.pending.kind === 'web_search'
+    ? 'Web search setup' : 'Seed review';
+  $('q-context').textContent = (data.context || []).join('\n');
+  $('q-prompt').textContent = data.pending.prompt.trim() || 'Your answer?';
+  $('q-answer').value = '';
+  $('q-error').textContent = data.pending.default
+    ? `Suggestion: ${data.pending.default}` : '';
+  if (!dialog.open) dialog.showModal();
+  $('q-answer').focus();
+}
+
+async function sendAnswer(answer) {
+  if (!selected || !dialogFor) return;
+  try {
+    await api(`/api/runs/${selected}/answer`, {
+      method: 'POST',
+      body: JSON.stringify({ id: dialogFor, answer }),
+    });
+    $('question').close();
+    dialogFor = null;
+  } catch (err) { $('q-error').textContent = err.message; }
+}
+
+function modelChoice() {
+  if ($('model').value === '__custom__') return $('model-custom').value.trim() || null;
+  return $('model').value || null;
+}
+
+async function loadModels() {
+  const select = $('model');
+  const note = $('model-note');
+  const data = await api('/api/models')
+    .catch((err) => ({ current: '', models: [], error: err.message }));
+  const current = data.current || '';
+  const models = data.models || [];
+  select.innerHTML = '';
+  const configOption = document.createElement('option');
+  configOption.value = '';
+  configOption.textContent = current ? `from config (${current})` : 'from config';
+  select.appendChild(configOption);
+  for (const name of models) {
+    const option = document.createElement('option');
+    option.value = name;
+    option.textContent = name;
+    select.appendChild(option);
+  }
+  const custom = document.createElement('option');
+  custom.value = '__custom__';
+  custom.textContent = 'Other…';
+  select.appendChild(custom);
+  if (current && models.includes(current)) select.value = current;  // 404/405 servers
+  note.textContent = data.error
+    ? `listing models failed: ${data.error}`
+    : `${models.length} models · ${data.url}`;
+}
+
+$('model').onchange = () => {
+  const custom = $('model').value === '__custom__';
+  $('model-custom-wrap').hidden = !custom;
+  if (custom) $('model-custom').focus();
+};
+
+$('new-run').onsubmit = async (event) => {
+  event.preventDefault();
+  if (busy) return;
+  busy = true;
+  showError('');
+  try {
+    const body = {
+      seed: $('seed').value,
+      chapters: $('chapters').value ? Number($('chapters').value) : null,
+      model: modelChoice(),
+      plan_only: $('plan-only').checked,
+      seed_review: $('seed-review').value || null,
+    };
+    const started = await api('/api/runs', { method: 'POST', body: JSON.stringify(body) });
+    await selectRun(started.id);
+  } catch (err) { showError(err.message); }
+  finally { busy = false; }
+};
+
+$('resume').onclick = async () => {
+  if (!selected || busy) return;
+  busy = true;
+  showError('');
+  try {
+    await api('/api/runs', { method: 'POST', body: JSON.stringify({ resume: selected }) });
+    await selectRun(selected);
+  } catch (err) { showError(err.message); }
+  finally { busy = false; }
+};
+
+$('stop').onclick = async () => {
+  if (!selected) return;
+  try { await api(`/api/runs/${selected}/stop`, { method: 'POST' }); await refresh(); }
+  catch (err) { showError(err.message); }
+};
+
+$('q-send').onclick = () => sendAnswer($('q-answer').value);
+$('q-default').onclick = () => sendAnswer('');
+$('q-answer').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') { event.preventDefault(); sendAnswer($('q-answer').value); }
+});
+
+(async function init() {
+  loadModels();
+  try {
+    const cfg = await api('/api/config');
+    $('config').textContent = `${cfg.model || 'model from config'} · ${cfg.web_output}`;
+    $('chapters').placeholder = `auto (${cfg.num_chapters})`;
+    $('chapters').title = `From config: ${cfg.words_per_chapter} words per chapter`;
+    $('seed-review').value = ['ask', 'warn', 'off'].includes(cfg.seed_review)
+      ? cfg.seed_review : '';
+  } catch (err) { showError(err.message); }
+
+  const wanted = new URLSearchParams(window.location.search).get('run');
+  const data = await api('/api/runs').catch(() => ({ runs: [] }));
+  const runs = data.runs || [];
+  const pick = runs.find((run) => run.id === wanted) || runs[0];
+  if (pick) await selectRun(pick.id);
+  else { rememberRun(null); await refresh(); }
+  setInterval(() => { if (!busy) refresh(); }, 2000);
+})();
+</script>
+</body>
+</html>

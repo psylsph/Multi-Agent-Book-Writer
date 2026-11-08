@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: "Install dependencies (lockfile must be up to date)"
-        run: uv sync --locked
+        run: uv sync --locked --extra web
       - name: "Lint (bug-catching rules)"
         run: uv run ruff check .
       - name: "Tests (offline - no LLM, network or Docker needed)"

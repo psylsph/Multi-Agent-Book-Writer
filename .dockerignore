@@ -1,0 +1,14 @@
+.venv
+.git
+.github
+output
+output-*
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.coverage
+config.yaml
+tests
+tools
+images
