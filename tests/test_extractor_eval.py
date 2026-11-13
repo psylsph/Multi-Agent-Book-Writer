@@ -5,6 +5,7 @@ import re
 
 import pytest
 
+from shared.prompts import unfence
 from tests.fake_llm import FakeResponse
 from tools import extractor_eval as ev
 from tools import extractor_prompts
@@ -139,7 +140,7 @@ def _case_for_text(evidence):
 
 def _answer_death_question(prompt):
     """A model that answers the focused death/alive questions correctly."""
-    evidence = prompt.split('"""')[1]
+    evidence = unfence(prompt)
     candidates = prompt.split("Candidates: ")[1].split("\n")[0].split(", ")
     case = _case_for_text(evidence)
     truth = {n for kind, who in case["events"] if kind == "death"

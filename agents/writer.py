@@ -8,15 +8,18 @@ story state (chronology) used by every later continuity check.
 """
 
 import re
+import time
 
 from shared import extraction_checks, prompts
+from shared.scene_checks import chapter_cast, seed_places
+from shared.consistency import book_pov, style_rules
 from shared.context import context, update_context
 from shared.llm_utils import clean_llm_text, extract_json
 from shared.llm_client import (AbortRun, EndpointUnavailable, generate_prose,
                                generate_with_wait, get_config)
 from shared.output import chapter_filename, render_chapter, save_chapter, \
     save_interim
-from shared.resume import save_state
+from shared.resume import note_chapter, save_state
 from shared.story_state import (merge_states, minimal_state, normalize_state,
                                 render_story_facts, render_story_so_far)
 
@@ -35,6 +38,21 @@ _RETRY_NOTE = (
     "author's brief asks."
 )
 PREVIOUS_ENDING_WORDS = 180
+
+
+def next_block(chapters, n):
+    """The following chapter's outline, as a boundary: without it the writer
+    could not tell where this chapter should stop, and ran on into the next
+    chapter's events or ended short of its own (the reviewer then flagged an
+    outline gap and paid for a revision round). The last chapter is told to
+    conclude instead."""
+    after = next((c for c in chapters if c["number"] > n), None)
+    if not after:
+        return ("\nThis is the LAST chapter: bring the story to its "
+                "conclusion.\n")
+    return (f"\nNEXT CHAPTER (for where to stop - do NOT write any of it): "
+            f"Chapter {after['number']}: {after['title']} - "
+            f"{after.get('summary') or '(no summary)'}\n")
 
 
 def _bad_draft(draft, min_words):
@@ -117,7 +135,7 @@ Rules:
 {names_line}
 Chapter {number}: {title}
 
-\"\"\"{draft}\"\"\""""
+{prompts.fence(draft, "chapter")}"""
     last_error = None
     for attempt in (1, 2):  # one retry: a bad JSON reply loses continuity facts
         try:
@@ -175,7 +193,7 @@ def _ask_names(prompt, key, candidates):
 def _confirm_deaths(candidates, evidence):
     """Which of `candidates` die in this chapter? (a subset, or None)"""
     return _ask_names(f"""Text:
-\"\"\"{evidence}\"\"\"
+{prompts.fence(evidence)}
 
 Candidates: {', '.join(candidates)}
 
@@ -189,7 +207,7 @@ def _confirm_alive(candidates, evidence):
     says someone died will usually also list them here as alive, and the
     disagreement exposes the mistake."""
     return _ask_names(f"""Text:
-\"\"\"{evidence}\"\"\"
+{prompts.fence(evidence)}
 
 Candidates: {', '.join(candidates)}
 
@@ -363,23 +381,24 @@ def refresh_state(number):
     """Re-extract chapter `number`'s summary and story facts from its FINAL
     (edited) text, so later chapters and reviews build on what the book now
     says rather than on the unrevised draft. Keeps the old state if the
-    extraction fails."""
+    extraction fails. Returns True when the state was refreshed."""
     chapters = context.get("chapters", [])
     chapter = next((c for c in chapters if c["number"] == number), None)
     drafts = context.get("drafts", {})
     text = _final_body(number) or drafts.get(number)
     if not chapter or not text:
-        return
+        return False
     result = _summarize_and_extract(number, chapter["title"], text,
                                     fallback=False)
     if result is None:
-        return
+        return False
     summaries = context.get("summaries", {})
     chronology = context.get("chronology", {})
     summaries[number], chronology[number] = result
     _save_state(chapters, drafts, summaries, chronology)
     print(f"[WRITER] Story state for chapter {number} refreshed from the "
           "edited text.")
+    return True
 
 
 def run_writer(only=None):
@@ -410,6 +429,12 @@ def run_writer(only=None):
     # The bible rides in the system message: identical for every chapter, so
     # servers with prompt caching reuse it instead of re-reading it each time.
     system = prompts.with_bible(prompts.WRITER, bible)
+    # book.style is linted on every chapter; say so up front (constant per
+    # run, so it rides in the cached system message too)
+    rules = style_rules(cfg["book"].get("style") or {})
+    if rules:
+        system += "\n\nSTYLE RULES (checked on every chapter)\n" + "\n".join(
+            f"- {r}" for r in rules)
 
     drafts, summaries, chronology = (context.get("drafts", {}),
                                     context.get("summaries", {}),
@@ -453,6 +478,31 @@ def run_writer(only=None):
                 "transition; do not repeat or paraphrase it):\n"
                 + _tail_words(prev_text) + "\n")
 
+        # the editor holds every chapter to this person (the seed's, or third
+        # person): say it before drafting, not after. A configured
+        # book.style.pov is already in the system message.
+        pov_line = ""
+        if not str((cfg["book"].get("style") or {}).get("pov") or "").strip():
+            pov, _ = book_pov(None, [context.get("seed", "")]
+                              + list(bible.get("constraints") or []))
+            if pov:
+                pov_line = (f"\n- Narrate in the {pov} person, as the rest of "
+                            "the book is (dialogue aside).")
+
+        # the editor checks both in code (shared/scene_checks.py): say them
+        # before drafting. A model put a couple at a dinner the outline gave
+        # to two others, and moved a Hampshire village to Somerset.
+        cast = chapter_cast(chapter.get("summary", ""),
+                            bible.get("characters") or [])
+        if cast:
+            pov_line += ("\n- In this chapter's scenes: " + ", ".join(cast)
+                         + ". Anyone else may be mentioned or remembered, but "
+                         "is not present.")
+        places = seed_places(context.get("seed", ""), bible.get("setting", ""))
+        if places:
+            pov_line += (f"\n- The book is set in {' / '.join(places)}; do "
+                         "not move it to another county.")
+
         prompt = f"""Write Chapter {n} of "{title}".
 
 STORY FACTS (established continuity - do not contradict):
@@ -466,15 +516,19 @@ LORE BRIEF FOR THIS CHAPTER:
 
 CHAPTER {n}: {ch_title}
 Chapter summary: {chapter.get('summary', '(none provided)')}
-
+{next_block(chapters, n)}
 Requirements:
 - Write {min_words}-{max_words} words of continuous narrative prose. Length
   is enforced after drafting: chapters below {min_words} words are sent back
   for substantive expansion (not padding), so write fully from the start.
+- Hit every plot beat in the lore brief, in order: a reviewer checks the
+  chapter against them.
+- End where this chapter's summary ends. Do not start the next chapter's
+  events.
 - Keep character names, relationships, and world facts EXACTLY consistent
   with the story bible and the STORY FACTS above.
 - Do NOT include a chapter heading, the chapter title, or any meta commentary.
-- Begin directly with the narrative."""
+- Begin directly with the narrative.{pov_line}"""
 
         try:
             draft = _draft_chapter(n, prompt, system, min_words)
@@ -505,6 +559,7 @@ Requirements:
         save_interim(chapter_filename("draft", n),
                      render_chapter(n, ch_title, draft))
         save_chapter(n, ch_title, draft)
+        note_chapter(n, drafted_at=time.time())
         print(f"[WRITER] Draft completed for chapter {n} ({word_count} words).")
 
         summaries[n], chronology[n] = _summarize_and_extract(n, ch_title,

@@ -9,6 +9,7 @@ from shared import prompts, web_search
 from shared.context import context, reset_context, update_context
 from shared.llm_client import load_config
 from shared.story_state import minimal_state
+from shared.prompts import unfence
 
 BIBLE = {"title": "T", "genre": "Gothic", "tone": "Dry and wry",
          "premise": "p", "world": "A salt marsh", "constraints": [],
@@ -92,7 +93,7 @@ def test_fact_checker_prompt_forbids_leaking_the_story(tmp_path, monkeypatch):
                    if "fact-check" in p else "BRIEF")
     monkeypatch.setattr(researcher, "generate_with_wait", rec)
     monkeypatch.setattr(web_search, "is_available", lambda: True)
-    monkeypatch.setattr(web_search, "search", lambda q: [])
+    monkeypatch.setattr(web_search, "search", lambda q, **k: [])
     update_context("chapters", CHAPTERS[:1])
     researcher.run_researcher()
     planning = next(c for c in rec.calls if "fact-check" in c["prompt"])
@@ -130,8 +131,7 @@ def test_editor_revise_and_polish_have_system_prompts(tmp_path, monkeypatch):
     def reply(prompt):
         if "You are revising" in prompt:
             return _words(120)
-        start = prompt.index("## Chapter")
-        return prompt[start:prompt.index("\n\nReturn ONLY")]
+        return unfence(prompt, "chapter")
 
     rec = Recorder(reply)
     monkeypatch.setattr(editor, "generate_prose", rec)
@@ -236,3 +236,123 @@ def test_writer_stops_when_the_model_keeps_refusing(tmp_path, monkeypatch):
     assert len(rec.calls) == 2                     # two attempts, then stop
     assert context["drafts"] == {}                 # the refusal is never saved
     assert not (tmp_path / "out" / "chapters").exists()
+
+
+# ------------------------------------------------- fences, boundaries, rules
+
+def test_fence_round_trips_and_survives_triple_quotes_and_its_own_tag():
+    text = 'She read: """old letter""" and wrote </chapter> twice.'
+    wrapped = prompts.fence(text, "chapter")
+    assert wrapped.startswith("<chapter>\n") and wrapped.endswith("\n</chapter>")
+    assert wrapped.count("</chapter>") == 1          # the inner one escaped
+    assert unfence(f"Edit this:\n{wrapped}\n\nReturn it.", "chapter") == text
+    assert unfence("no fence here", "chapter") is None
+
+
+def test_writer_is_told_where_the_chapter_stops(tmp_path, monkeypatch):
+    """Regression: the writer saw only its own chapter's summary, so it ran on
+    into the next chapter's events or ended short of its own."""
+    rec = _writer_run(tmp_path, monkeypatch)
+    writer.run_writer()
+    first, last = rec.calls[0]["prompt"], rec.calls[-1]["prompt"]
+    assert "NEXT CHAPTER" in first and "Chapter 2: Ch2 - s2" in first
+    assert "do NOT write any of it" in first
+    assert "NEXT CHAPTER" not in last and "LAST chapter" in last
+    assert "Hit every plot beat in the lore brief" in first
+
+
+def test_writer_is_told_the_style_rules_it_is_linted_against(tmp_path,
+                                                             monkeypatch):
+    rec = Recorder(lambda p: _words(120))
+    _config(tmp_path, "  style:\n    banned_phrases: [\"coil of\"]\n"
+                      "    tense: past\n")
+    monkeypatch.setattr(writer, "generate_prose", rec)
+    monkeypatch.setattr(writer, "generate_with_wait", lambda p, **k: STATE_JSON)
+    writer.run_writer()
+    system = rec.calls[0]["system"]
+    assert "STYLE RULES" in system and '"coil of"' in system
+    assert "past tense" in system
+    assert len({c["system"] for c in rec.calls}) == 1    # still cacheable
+
+
+def test_no_style_section_without_style_rules(tmp_path, monkeypatch):
+    rec = _writer_run(tmp_path, monkeypatch)
+    writer.run_writer()
+    assert "STYLE RULES" not in rec.calls[0]["system"]
+
+
+def test_researcher_sees_the_whole_outline(tmp_path, monkeypatch):
+    """Regression: the brief must say what to set up for later chapters, but
+    the researcher was shown only the chapter it briefed."""
+    _config(tmp_path)
+    rec = Recorder("brief")
+    monkeypatch.setattr(researcher, "generate_with_wait", rec)
+    monkeypatch.setattr(researcher.web_search, "enabled", lambda: False)
+    researcher.run_researcher()
+    systems = {c["system"] for c in rec.calls}
+    assert len(systems) == 1                       # same prefix every chapter
+    (system,) = systems
+    assert "BOOK OUTLINE" in system
+    assert all(f"{n}. Ch{n}: s{n}" in system for n in (1, 2, 3))
+
+
+def _edit_run(tmp_path, monkeypatch, extra="", constraints=(), draft=None):
+    _config(tmp_path, "  revision_rounds: 1\n" + extra)
+    update_context("bible", {**BIBLE, "constraints": list(constraints)})
+    update_context("drafts", {1: draft or _words(120)})
+    update_context("chapters", CHAPTERS[:1])
+    update_context("chronology", {})
+
+    def reply(prompt):
+        if "You are revising" in prompt:
+            return _words(120)
+        return unfence(prompt, "chapter")
+
+    rec = Recorder(reply)
+    monkeypatch.setattr(editor, "generate_prose", rec)
+    editor.run_editor()
+    return rec
+
+
+def test_polish_gets_the_body_and_the_rules_the_guard_enforces(tmp_path,
+                                                                monkeypatch):
+    """Regression: the polish was linted against banned words and style
+    phrases it was never shown, and was thrown away whole when it reused one."""
+    rec = _edit_run(tmp_path, monkeypatch,
+                    "  style:\n    banned_phrases: [\"coil of\"]\n",
+                    constraints=['Never the words "unhurried" or "exactly".'])
+    polish = next(c for c in rec.calls if c["prompt"].startswith("Copy-edit"))
+    prompt = polish["prompt"]
+    assert "## Chapter" not in prompt              # no heading to keep or lose
+    assert unfence(prompt, "chapter") == _words(120)
+    assert '"unhurried"' in prompt and '"coil of"' in prompt
+    assert "not a rewrite" in prompt
+
+
+def test_revise_prompt_repeats_its_task_after_the_chapter(tmp_path,
+                                                          monkeypatch):
+    rec = _edit_run(tmp_path, monkeypatch,
+                    constraints=['Never "foo".'], draft=_words(120) + " foo")
+    revise = next(c["prompt"] for c in rec.calls
+                  if "You are revising" in c["prompt"])
+    after = revise.split("</chapter>", 1)[1]
+    assert "fix only these findings (banned_word)" in after
+    assert "mirror the input length" not in revise    # advice for us, not it
+
+
+def test_revise_reminder_states_the_length_floor(monkeypatch):
+    rec = Recorder(lambda p: _words(600))
+    monkeypatch.setattr(editor, "generate_prose", rec)
+    lint = [{"check": "word_count", "minimum": 500, "detail": "short"}]
+    editor._revise(1, "T", _words(200), lint, [])
+    after = rec.calls[0]["prompt"].split("</chapter>", 1)[1]
+    assert "at least 500 words" in after
+
+
+def test_drafted_chapters_are_timed(tmp_path, monkeypatch):
+    from shared.resume import load_state
+    _writer_run(tmp_path, monkeypatch)
+    writer.run_writer()
+    notes = load_state()["chapter_notes"]
+    assert sorted(notes) == [1, 2, 3]
+    assert notes[1]["drafted_at"] <= notes[3]["drafted_at"]

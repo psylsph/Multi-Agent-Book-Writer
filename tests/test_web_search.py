@@ -155,7 +155,7 @@ def docker_env(tmp_path, monkeypatch):
     monkeypatch.setattr(web_search, "config_dir", lambda: tmp_path / "sx")
     monkeypatch.setattr(web_search.time, "sleep", lambda s: None)
 
-    def check():
+    def check(only=None):
         started = fake.ran("run") or fake.ran("start")
         return (True, "") if started else (False, "connection refused")
 
@@ -166,7 +166,7 @@ def docker_env(tmp_path, monkeypatch):
 
 
 def test_already_running_never_touches_docker(docker_env, monkeypatch):
-    monkeypatch.setattr(web_search, "check", lambda: (True, ""))
+    monkeypatch.setattr(web_search, "check", lambda only=None: (True, ""))
     assert web_search.offer_docker_setup() is True
     assert docker_env.calls == []
 
@@ -185,6 +185,25 @@ def test_declining_the_prompt_skips_docker(docker_env, monkeypatch):
     monkeypatch.setattr(web_search, "_ask", lambda q: False)
     assert web_search.offer_docker_setup() is False
     assert not docker_env.ran("run")
+
+
+def test_declining_says_without_search_only_when_nothing_works(
+        docker_env, tmp_path, monkeypatch, capsys):
+    # "the run continues without web search" was printed on declining
+    # SearXNG, before the other providers had even been tried
+    _config(tmp_path, "  enabled: true\n  providers: [searxng, parallel]\n")
+    monkeypatch.setattr(web_search, "_ask", lambda q: False)
+    monkeypatch.setattr(web_search, "check", lambda only=None: (
+        (True, "") if only == "parallel" else (False, "connection refused")))
+    assert web_search.offer_docker_setup() is True
+    out = capsys.readouterr().out
+    assert "Searching with parallel" in out and "without web search" not in out
+
+    monkeypatch.setattr(web_search, "check", lambda only=None: (False, "down"))
+    assert web_search.offer_docker_setup() is False
+    out = capsys.readouterr().out
+    assert "continues without web search" in out
+    assert "BOOKWRITER_SEARXNG_URL" in out
 
 
 def test_auto_start_yes_does_not_prompt(docker_env, tmp_path, monkeypatch):
@@ -221,7 +240,7 @@ def test_stopped_container_is_started_not_recreated(docker_env, monkeypatch):
     fake = FakeDocker(state="exited")
     monkeypatch.setattr(web_search, "_docker", fake)
     monkeypatch.setattr(web_search, "check",
-                        lambda: (True, "") if fake.ran("start")
+                        lambda only=None: (True, "") if fake.ran("start")
                         else (False, "down"))
     assert web_search.offer_docker_setup() is True
     assert fake.ran("start") == [["start", web_search.CONTAINER_NAME]]
@@ -236,7 +255,7 @@ def test_waiting_for_the_container_polls_health_not_search(docker_env,
     monkeypatch.setattr(web_search, "reachable",
                         lambda timeout=5: next(answers))
     monkeypatch.setattr(web_search, "check",
-                        lambda: searches.append(1) or (True, ""))
+                        lambda only=None: searches.append(1) or (True, ""))
     assert web_search._wait_until_ready() is True
     assert len(searches) == 1
 
@@ -244,7 +263,7 @@ def test_waiting_for_the_container_polls_health_not_search(docker_env,
 def test_waiting_gives_up_when_nothing_answers(docker_env, monkeypatch):
     monkeypatch.setattr(web_search, "reachable", lambda timeout=5: False)
     monkeypatch.setattr(web_search, "check",
-                        lambda: pytest.fail("searched an unreachable server"))
+                        lambda only=None: pytest.fail("searched an unreachable server"))
     ticks = iter(range(0, 1000, 50))
     monkeypatch.setattr(web_search.time, "time", lambda: next(ticks))
     assert web_search._wait_until_ready(seconds=90) is False
@@ -253,7 +272,7 @@ def test_waiting_gives_up_when_nothing_answers(docker_env, monkeypatch):
 def test_a_reachable_server_that_cannot_search_is_reported(
         docker_env, monkeypatch, capsys):
     monkeypatch.setattr(web_search, "check",
-                        lambda: (False, "HTTP 403: enable json"))
+                        lambda only=None: (False, "HTTP 403: enable json"))
     assert web_search._wait_until_ready() is False
     assert "cannot search: HTTP 403" in capsys.readouterr().out
 
@@ -353,7 +372,7 @@ def _research_setup(tmp_path, monkeypatch, results=None, verdicts=None,
 
     searched = []
 
-    def fake_search(query):
+    def fake_search(query, objective=None):
         searched.append(query)
         if isinstance(results, Exception):
             raise results
@@ -762,3 +781,264 @@ def test_verification_calls_use_the_verifier_agent(tmp_path, monkeypatch):
         agent_of[kind] = c["agent"]
     assert agent_of == {"propose": "researcher", "verify": "verifier",
                         "second": "verifier", "brief": "researcher"}
+
+
+def test_queries_are_spaced_by_min_interval(monkeypatch):
+    """Regression: a chapter's queries went out back to back, Brave's Search
+    API answered 429 and SearXNG suspended the engine for three minutes."""
+    monkeypatch.setattr(web_search, "PACING", True)    # off in conftest
+    real_pace = web_search._pace
+    clock, slept = [100.0], []
+    monkeypatch.setattr(web_search.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(web_search.time, "sleep",
+                        lambda s: (slept.append(s), clock.__setitem__(0, clock[0] + s)))
+    monkeypatch.setattr(web_search, "_last_query", [None])
+    real_pace(1.5)                      # the first query goes straight out
+    clock[0] += 0.5
+    real_pace(1.5)                      # 0.5 s later: waits the other 1.0 s
+    clock[0] += 3.0
+    real_pace(1.5)                      # long after: no wait
+    real_pace(0)                        # pacing off
+    assert slept == [1.0]
+
+
+# ------------------------------------------------- Parallel (MCP) provider
+
+class _MCP:
+    """A fake Parallel MCP server: requests.post -> JSON-RPC over SSE."""
+
+    def __init__(self, results=None, status=None, expire_once=False):
+        self.calls, self.sessions = [], 0
+        self.results = results if results is not None else [{
+            "url": "https://en.wikipedia.org/wiki/Hampshire",
+            "title": "Hampshire - Wikipedia",
+            "excerpts": ["The remainder of the county is rural.\n\n...\n\n"
+                         "Average rainfall is 640–1,060 mm per year "
+                         "and 9.8 °C on average.\n\n...\n\nIBM has a lab."]}]
+        self.status, self.expire_once = status, expire_once
+
+    def __call__(self, url, headers=None, json=None, timeout=None):
+        self.calls.append({"url": url, "headers": dict(headers or {}), "body": json})
+        method = json["method"]
+        if method == "initialize":
+            self.sessions += 1
+            return _SSE({"jsonrpc": "2.0", "id": json["id"], "result": {}},
+                        session=f"s{self.sessions}")
+        if method == "notifications/initialized":
+            return _SSE(None, status=202)
+        if self.expire_once and self.sessions == 1:
+            return _SSE(None, status=404)
+        if self.status:
+            return _SSE(None, status=self.status)
+        data = {"search_id": "x", "results": self.results}
+        return _SSE({"jsonrpc": "2.0", "id": json["id"], "result": {
+            "content": [{"type": "text", "text": "..."}], "isError": False,
+            "structuredContent": data}})
+
+
+class _SSE:
+    """An event-stream reply WITHOUT a charset, as Parallel sends it."""
+
+    def __init__(self, message, status=200, session=None):
+        self.status_code = status
+        self.headers = {"mcp-session-id": session} if session else {}
+        body = "" if message is None else (
+            "event: message\ndata: " + json.dumps(message, ensure_ascii=False) + "\n\n")
+        self.content = body.encode("utf-8")
+        self.text = self.content.decode("latin-1")   # what requests would guess
+
+
+def _parallel(tmp_path, monkeypatch, server=None, extra=""):
+    _config(tmp_path, "  enabled: true\n  providers: [parallel]\n" + extra)
+    monkeypatch.setattr(web_search, "_PARALLEL", {"session": None, "next_id": 1})
+    server = server or _MCP()
+    monkeypatch.setattr(web_search.requests, "post", server)
+    return server
+
+
+def test_parallel_search_speaks_mcp_and_keeps_the_answering_passage(
+        tmp_path, monkeypatch):
+    server = _parallel(tmp_path, monkeypatch, extra="  snippet_chars: 120\n")
+    monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
+    found = web_search.search("average rainfall Hampshire",
+                              objective="Typical annual rainfall in Hampshire")
+    methods = [c["body"]["method"] for c in server.calls]
+    assert methods == ["initialize", "notifications/initialized", "tools/call"]
+    call = server.calls[-1]
+    assert call["headers"]["Mcp-Session-Id"] == "s1"
+    assert call["body"]["params"] == {"name": "web_search", "arguments": {
+        "objective": "Typical annual rainfall in Hampshire",
+        "search_queries": ["average rainfall Hampshire"]}}
+    (result,) = found
+    assert result["url"] == "https://en.wikipedia.org/wiki/Hampshire"
+    # the passage that answers the claim, not the page's opening
+    assert result["snippet"].startswith("Average rainfall is 640")
+    # decoded as UTF-8 although the stream names no charset
+    assert "–" in result["snippet"] and "°C" in result["snippet"]
+    assert "Â" not in result["snippet"]
+    # a second search reuses the session
+    web_search.search("rainfall")
+    assert [c["body"]["method"] for c in server.calls].count("initialize") == 1
+
+
+def test_parallel_never_gets_the_llm_key(tmp_path, monkeypatch):
+    server = _parallel(tmp_path, monkeypatch)
+    monkeypatch.setenv("LLM_API_KEY", "llm-secret")
+    monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
+    web_search.search("q")
+    assert all("Authorization" not in c["headers"] for c in server.calls)
+    monkeypatch.setenv("PARALLEL_API_KEY", "par-key")
+    web_search.search("q")
+    assert server.calls[-1]["headers"]["Authorization"] == "Bearer par-key"
+
+
+def test_parallel_key_from_config_env_reference(tmp_path, monkeypatch):
+    server = _parallel(tmp_path, monkeypatch,
+                       extra='  parallel_api_key: "env:MY_PAR"\n')
+    monkeypatch.setenv("MY_PAR", "from-env")
+    web_search.search("q")
+    assert server.calls[-1]["headers"]["Authorization"] == "Bearer from-env"
+
+
+def test_an_expired_parallel_session_is_reopened_once(tmp_path, monkeypatch):
+    server = _parallel(tmp_path, monkeypatch, _MCP(expire_once=True))
+    assert web_search.search("q")
+    assert [c["body"]["method"] for c in server.calls].count("initialize") == 2
+
+
+def test_parallel_rate_limit_is_explained(tmp_path, monkeypatch):
+    _parallel(tmp_path, monkeypatch, _MCP(status=429))
+    with pytest.raises(web_search.SearchError, match="parallel_api_key"):
+        web_search.search("q")
+
+
+def test_providers_are_merged_and_one_failing_leaves_the_other(
+        tmp_path, monkeypatch, capsys):
+    server = _parallel(tmp_path, monkeypatch)
+    _config(tmp_path, "  enabled: true\n  providers: [searxng, parallel]\n")
+    monkeypatch.setattr(web_search, "_warned", set())
+    monkeypatch.setattr(web_search.requests, "get", lambda *a, **k: _Resp(data={
+        "results": [{"url": "https://en.wikipedia.org/wiki/Hampshire",
+                     "title": "dupe", "content": "c"},
+                    {"url": "https://example.org/a", "title": "A",
+                     "content": "a"}]}))
+    found = web_search.search("q")
+    # in provider order, one entry per URL
+    assert [r["url"] for r in found] == ["https://en.wikipedia.org/wiki/Hampshire",
+                                         "https://example.org/a"]
+    assert found[0]["title"] == "dupe"
+    # SearXNG down: Parallel still answers, and the failure is said once
+    def down(*a, **k):
+        raise requests.exceptions.ConnectionError("refused")
+    monkeypatch.setattr(web_search.requests, "get", down)
+    assert web_search.search("q")
+    web_search.search("q")
+    assert capsys.readouterr().out.count("searxng failed") == 1
+    # both down: an error
+    server.status = 503
+    with pytest.raises(web_search.SearchError, match="searxng: .*parallel: "):
+        web_search.search("q")
+
+
+def test_parallel_only_never_offers_docker(tmp_path, monkeypatch):
+    _parallel(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_search, "_docker",
+                        lambda *a, **k: pytest.fail("touched docker"))
+    assert web_search.offer_docker_setup() is True
+
+
+def test_searxng_failing_falls_back_to_parallel(tmp_path, monkeypatch):
+    _parallel(tmp_path, monkeypatch)
+    _config(tmp_path, "  enabled: true\n  providers: [searxng, parallel]\n"
+                      "  auto_start: \"no\"\n")
+    monkeypatch.setattr(web_search.requests, "get", lambda *a, **k: _Resp(503))
+    assert web_search.offer_docker_setup() is True
+
+
+def test_unknown_providers_are_warned_about_and_dropped(tmp_path):
+    from shared.config_schema import problems
+    warnings = problems({"web_search": {"providers": ["searxng", "parralel"]}})
+    assert any("parralel" in w and "parallel" in w for w in warnings)
+    _config(tmp_path, "  providers: [parralel]\n")
+    assert web_search.providers() == ["searxng"]
+
+
+def test_best_passages_prefers_the_claims_words():
+    excerpts = ["Opening text about nothing.\n\n...\n\nThe ferry runs hourly "
+                "from the quay.\n\n...\n\nClosing remarks."]
+    text = web_search.best_passages(excerpts, {"ferry", "hourly", "quay"}, 40)
+    assert text.startswith("The ferry runs hourly")
+    assert web_search.best_passages([], {"x"}, 100) == ""
+
+
+def test_the_objective_passes_the_same_screen_as_the_query(tmp_path, monkeypatch):
+    """Parallel is sent the claim as well as the query: a claim that names a
+    character (its query being generic) must not reach it."""
+    objectives = []
+    proposed = [{"claim": "Hospital wards triage patients on arrival",
+                 "query": "how hospital wards triage"},
+                {"claim": "Willow Rooms hold the night shift's handover",
+                 "query": "night shift handover"}]
+    _research_setup(tmp_path, monkeypatch, proposed=proposed)
+    monkeypatch.setattr(web_search, "search", lambda q, objective=None: (
+        objectives.append(objective) or [dict(r) for r in TRIAGE_RESULTS]))
+    researcher.run_researcher()
+    assert objectives == ["Hospital wards triage patients on arrival",
+                          "night shift handover"]       # the name never sent
+
+
+# ------------------------------------------------------ TinyFish provider
+
+def _tinyfish(tmp_path, monkeypatch, reply=None, status=200, extra=""):
+    _config(tmp_path, "  enabled: true\n  providers: [tinyfish]\n" + extra)
+    calls = []
+
+    def get(url, timeout=None, params=None, headers=None):
+        calls.append({"url": url, "params": dict(params or {}),
+                      "headers": dict(headers or {})})
+        return _Resp(status, data=reply if reply is not None else {"results": [
+            {"position": 1, "title": "Solent averages",
+             "url": "https://www.metoffice.gov.uk/x", "snippet": "Annual 676.84"},
+            {"title": "no link"}]})
+    monkeypatch.setattr(web_search.requests, "get", get)
+    return calls
+
+
+def test_tinyfish_search_sends_the_key_and_the_purpose(tmp_path, monkeypatch):
+    calls = _tinyfish(tmp_path, monkeypatch)
+    monkeypatch.setenv("TINYFISH_API_KEY", "tf-key")
+    monkeypatch.setenv("LLM_API_KEY", "llm-secret")
+    found = web_search.search("rainfall Hampshire", objective="Hampshire's rainfall")
+    assert found == [{"title": "Solent averages", "url": "https://www.metoffice.gov.uk/x",
+                      "snippet": "Annual 676.84"}]
+    (call,) = calls
+    assert call["url"] == "https://api.search.tinyfish.ai/"
+    assert call["headers"] == {"X-API-Key": "tf-key"}          # never the LLM key
+    assert call["params"] == {"query": "rainfall Hampshire",
+                              "purpose": "Hampshire's rainfall"}
+
+
+def test_tinyfish_without_a_key_says_how_to_set_one(tmp_path, monkeypatch):
+    calls = _tinyfish(tmp_path, monkeypatch)
+    monkeypatch.delenv("TINYFISH_API_KEY", raising=False)
+    with pytest.raises(web_search.SearchError, match="TINYFISH_API_KEY"):
+        web_search.search("q")
+    assert calls == []                                      # nothing sent
+
+
+def test_tinyfish_key_from_an_env_reference(tmp_path, monkeypatch):
+    calls = _tinyfish(tmp_path, monkeypatch, extra='  tinyfish_api_key: "env:TF2"\n')
+    monkeypatch.setenv("TF2", "other")
+    web_search.search("q")
+    assert calls[0]["headers"]["X-API-Key"] == "other"
+    assert "purpose" not in calls[0]["params"]             # no objective given
+
+
+@pytest.mark.parametrize("status, fragment", [(401, "refused the key"),
+                                              (429, "rate limit"),
+                                              (500, "HTTP 500")])
+def test_tinyfish_errors_are_explained(tmp_path, monkeypatch, status, fragment):
+    _tinyfish(tmp_path, monkeypatch, status=status)
+    monkeypatch.setenv("TINYFISH_API_KEY", "k")
+    with pytest.raises(web_search.SearchError, match=fragment):
+        web_search.search("q")

@@ -14,6 +14,7 @@ from shared import llm_client, output, runlog
 from shared.context import context, reset_context, update_context
 from shared.llm_client import EndpointUnavailable, load_config
 from shared.resume import _read_json, load_state, summarize_for_log
+from shared.prompts import unfence
 
 
 def _config(tmp_path, book="", agents="", output_extra="", reviewer_on=False):
@@ -185,7 +186,7 @@ def _web_research(monkeypatch, tmp_path, proposer):
     update_context("chapters", CHAPTERS[:1])
     update_context("bible", {"title": "T", "characters": []})
     monkeypatch.setattr(web_search, "is_available", lambda: True)
-    monkeypatch.setattr(web_search, "search", lambda q: pytest.fail("searched"))
+    monkeypatch.setattr(web_search, "search", lambda q, **k: pytest.fail("searched"))
 
     def llm(prompt, **kwargs):
         if "fact-check a novel" in prompt:
@@ -240,8 +241,7 @@ def _editor(monkeypatch, tmp_path, drafts, prose, book="", agents="",
 
 
 def _echo_polish(prompt):
-    start = prompt.index("## Chapter")
-    return prompt[start:prompt.index("\n\nReturn ONLY")]
+    return unfence(prompt, "chapter")
 
 
 def test_reviewer_findings_are_fixed_and_rereviewed(tmp_path, monkeypatch):
@@ -564,8 +564,8 @@ def test_the_lint_report_flags_short_chapters_and_findings(tmp_path):
     editor._write_lint_report({1: f"{_words(120)} ominous",
                                2: _words(30)})
     report = (out / "interim" / "lint_report.md").read_text()
-    assert "- Chapter 1: 121 words (min 80)" in report
-    assert "- Chapter 2: 30 words **SHORT** (min 80)" in report
+    assert "- Chapter 1: 121 words (min 80, max 150)" in report
+    assert "- Chapter 2: 30 words **SHORT** (min 80, max 150)" in report
     assert "banned word 'ominous'" in report
 
 

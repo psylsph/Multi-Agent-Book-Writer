@@ -22,16 +22,26 @@ services:
     build: .
     # match the host user, so the books written into ./output are yours
     user: "${UID:-1000}:${GID:-1000}"
+    # Every interface by default, so phones can reach it (e.g. over Tailscale).
+    # The GUI has no accounts: set BOOKWRITER_TOKEN if the host is on a network
+    # you don't trust (then open http://<host>:8000/?token=<it> once), or
+    # BOOKWRITER_BIND=127.0.0.1 to keep it on this machine.
     ports:
-      - "8000:8000"
+      - "${BOOKWRITER_BIND:-0.0.0.0}:8000:8000"
     volumes:
       - ./output:/app/output
       - ./seeds:/app/seeds:ro
       - ./config.yaml:/app/config.yaml:ro
     environment:
       LLM_API_KEY: "${LLM_API_KEY:-}"
+      # optional: a higher rate limit for web_search.providers: [parallel]
+      PARALLEL_API_KEY: "${PARALLEL_API_KEY:-}"
+      # needed for web_search.providers: [tinyfish]
+      TINYFISH_API_KEY: "${TINYFISH_API_KEY:-}"
       BOOKWRITER_CONFIG: /app/config.yaml
       BOOKWRITER_WEB_OUTPUT: /app/output/web
+      # optional shared secret for the GUI (see ports above)
+      BOOKWRITER_TOKEN: "${BOOKWRITER_TOKEN:-}"
       # set to http://host.docker.internal:<port> to reach an LLM server on
       # the host without editing config.yaml (see README, Docker)
       BOOKWRITER_LLM_BASE_URL: "${BOOKWRITER_LLM_BASE_URL:-}"

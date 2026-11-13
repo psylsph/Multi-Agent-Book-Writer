@@ -13,11 +13,14 @@ Returns a structured verdict + issues; the editor agent feeds the findings
 into bounded revision rounds.
 """
 
+import re
+
 from shared import prompts
 from shared.context import context
 from shared.llm_client import (AbortRun, generate_with_wait,
                                get_config)
 from shared.llm_utils import extract_json
+from shared.web_search import quote_in_text
 from shared.output import chapter_filename, save_interim
 from shared.story_state import (merge_states, render_story_facts,
                                 render_story_so_far)
@@ -45,6 +48,23 @@ OUTLINE_GAP: a key beat or event that the CHAPTER OUTLINE or its plot beats requ
 
 _CONSTRAINT_CHECK = """\
 CONSTRAINT: the draft breaks one of the AUTHOR CONSTRAINTS below in a way a word counter cannot detect - point of view, tense, content rules, style rules. Skip mechanical rules (banned words, quotas); a linter checks those. Quote the offending passage and say how to fix it."""
+
+
+# Quoted spans in an issue's description: "..." or curly quotes, 15+ chars
+# (shorter ones are single words or titles, not evidence).
+_QUOTED = re.compile(r"\"([^\"]{15,})\"|\u201c([^\u201d]{15,})\u201d")
+
+
+def quotes_found(description, draft):
+    """False when the description quotes the draft but NONE of its quotes
+    is really in it - the reviewer invented the evidence. True otherwise,
+    including when there is no quote at all (an outline gap describes
+    something absent, so it has nothing to quote). One real quote is enough:
+    a reviewer may also quote the outline or a rule it compares against."""
+    quotes = [a or b for a, b in _QUOTED.findall(description)]
+    if not quotes:
+        return True
+    return any(quote_in_text(q, draft) for q in quotes)
 
 
 def enabled_checks():
@@ -93,7 +113,7 @@ def _build_prompt(number, title, draft, checks, bible):
         types.append("constraint")
 
     parts.append(f'CHAPTER {number} DRAFT TO REVIEW ("{title}"):\n'
-                 f'"""{draft}"""')
+                 + prompts.fence(draft, "chapter"))
 
     checklist = []
     if "continuity" in checks:
@@ -140,6 +160,13 @@ def review_chapter(number, title, draft):
         if isinstance(issue, dict) and issue.get("description"):
             kind = str(issue.get("type", "continuity")).strip()
             if kind in disabled:
+                continue
+            if not quotes_found(str(issue["description"]), draft):
+                # deterministic code checks the model: a finding whose
+                # evidence is not in the chapter would send a sound chapter
+                # back for revision
+                print(f"[REVIEWER] Chapter {number}: ignored a {kind} issue "
+                      "whose quotes are not in the chapter.")
                 continue
             issues.append({
                 "type": kind,

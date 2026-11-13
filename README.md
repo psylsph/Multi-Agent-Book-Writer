@@ -52,6 +52,7 @@ multi-agent-book-writer/
 │   ├── config_schema.py    # known config options; warns about typos
 │   ├── runlog.py           # copies console output to a log file
 │   ├── epub.py             # the EPUB builder behind make_epub.py
+│   ├── book_html.py        # the styled HTML page behind the GUI's book link
 │   └── output.py           # interim artifacts + bible formatting
 ├── seeds/
 │   ├── SEED_SCHEMA.md      # seed format reference
@@ -147,7 +148,7 @@ uv run main.py --demo 2   # same, but only the first 2 chapters
 | `--model NAME` | Override `llm.model` for this run. |
 | `--out FILE` | Override the output filename (written under `output.directory`). |
 | `--plan-only` | Stop after the seed review, story bible and outline. Rerun without it to write the book; it continues from that plan. |
-| `--seed-review MODE` | Override `book.seed_review` for this run: `ask`, `warn` or `off`. See [Seed review](#seed-review). |
+| `--seed-review MODE` | Override `book.seed_review` for this run: `ask`, `warn`, `auto` or `off`. See [Seed review](#seed-review). |
 | `--no-resume` | Ignore the saved run and start over from the seed. See [Resume](#resume). |
 | `-h`, `--help` | Show the built-in help. |
 
@@ -241,16 +242,19 @@ are divided.
    ```
 
    With `a` it asks up to `book.seed_questions` questions about gaps that would
-   change the book (a missing subplot, the ending, point of view). Type an
-   answer, or press Enter to accept the suggestion shown (`skip` accepts all
-   the rest); then add notes of your own if you like. The model then **expands
+   change the book (a missing subplot, the ending, point of view). The round's
+   questions are listed first; then type an answer to each, or press Enter to
+   accept the suggestion shown (`back` returns to the previous question, `skip`
+   accepts all the rest); then add notes of your own if you like. The model then **expands
    the seed** with your answers and the suggestions you accepted: it keeps
    every word you wrote and adds the new material where it belongs (a character
    under Characters, an event in the Outline). You see what changed and keep it
    (`k`) or undo it (`u`; your answers are then passed on as clarifications).
    The expanded seed is critiqued again, and so on until you choose `d`.
    Code checks every expansion: if it dropped a character, reworded a
-   constraint, lost an outline chapter or got shorter, it is not used.
+   constraint, lost an outline chapter or got shorter, the model is told what
+   it lost and tries once more; if that fails too, it is not used (the
+   rejected text is saved as `interim/seed_round_NN_rejected.md`).
 4. If the size doesn't fit, it asks which to use:
 
    ```
@@ -259,6 +263,17 @@ are divided.
    [c] choose your own
    [s] stop here: nothing is written, so you can edit the seed and rerun
    ```
+
+   A chapter length your seed states ("1,500-1,700 words per chapter", "2000
+   words a chapter", "chapters of about 1.8k words", "(about 2,000 words)" on
+   an outline line) is read by code and overrides `book.words_per_chapter`: a
+   range is aimed at its middle (1,600), and the recommendation is kept inside
+   it. The statement is then **taken out of the seed** (the sentence that
+   states it; the rest of the line stays), and out of any expansion or answer
+   that writes one in, so every later prompt sees one length: the number the
+   run settled on. The log lists what was removed. Your seed file is not
+   changed, and rerunning with it is still recognised as the same run. A
+   total book length ("about 50,000 words") is not per-chapter and stays.
 
 **The expanded seed is the master seed.** Each kept expansion is saved at once
 to `output/state/seed.json` and, readable, to `output/seed.md`; every later stage
@@ -281,7 +296,12 @@ several.
 
 `book.seed_review` sets the mode: `ask` (the default), `warn` (print the review
 and carry on with the requested size, never prompting; also what `ask` does
-without a terminal) or `off`. `--plan-only` stops after the outline so you can
+without a terminal), `auto` (accept every suggested answer, expand the seed with
+it, and review the expanded seed again until the reviewer asks nothing more —
+then take the recommended size if the request still does not fit; no terminal
+needed, and it stops after `book.seed_auto_rounds` expansion rounds, default 5,
+as a guard against a model that always asks; 0 reviews without expanding), or
+`off`. `--plan-only` stops after the outline so you can
 read the plan cheaply, then rerun without it to write the book.
 
 ## Making an EPUB
@@ -341,6 +361,17 @@ Then open <http://127.0.0.1:8000>.
   questions). A crash or a stop cannot take the server down, the pipeline's
   global config/context/stats stay per-run, and the CLI remains the only
   implementation of a run.
+- **Per-book settings.** Besides chapters, model and seed review, the
+  *Settings* panel overrides a curated set of `config.yaml` options for the
+  book you start: words per chapter, the length minimum and maximum, revision and
+  length rounds, review as you go, auto seed rounds, point of view, spelling, reasoning
+  effort and max tokens (all agents, and the reviewer's own), writer
+  temperature, and the reviewer, researcher and web fact-check switches. Each
+  field shows the value from `config.yaml`; leave it blank to keep it. The
+  server checks every value (`SETTINGS` in `web/app.py`) and writes it into
+  that run's own `config.yaml` only, so `config.yaml` itself and other books
+  are untouched, and a resumed book keeps the settings it started with. The
+  run's status line lists what was changed.
 - **Persistent, so any device can pick the book up.** The run's state is its
   directory on disk, not the server's memory: `job/job.json` says whether it is
   running (pid + its command line), `job/exit.json` records how it ended, and
@@ -357,15 +388,48 @@ Then open <http://127.0.0.1:8000>.
   cannot freeze Safari.
 - **The seed review works in the browser.** The prompts the CLI would print in
   the terminal are published as files (`<run>/ask/question.json`) and answered
-  from the page; the page shows the recent log above each question. With
+  from the page. A round's questions arrive together as one form (an empty
+  field takes its suggestion, and there is a box for your own notes); menus
+  are buttons; and keep-or-undo shows every line the expansion changed, not
+  just the log's last lines. Answers are text areas, so a paragraph is easy to
+  type on a phone. With
   `book.seed_review: ask` a run really does wait for you. An unanswered
   question falls back to its suggestion after `BOOKWRITER_ASK_TIMEOUT` seconds
   (default 900), the same way a closed terminal does.
+- **Progress you can read at a glance.** Once two chapters are finished the
+  status line estimates the time left, from the median time a chapter has
+  taken (so a night spent stopped does not skew it); while every chapter is
+  still being drafted it estimates the drafting only. Each chapter row also
+  says what the editor had to give up on: a rejected revision or polish, a
+  missing review, findings left (`state/chapter_notes.json`; the full story is
+  in `interim/diff_chapter_NN.md`).
 - **Stop saves the run.** It sends SIGINT — what Ctrl-C sends — so the partial
   book is saved and *Resume this book* continues from the last finished
   chapter. *Build EPUB* runs `make_epub.py` for the selected book.
-- **One book at a time, and no authentication.** Bind it to `127.0.0.1`. More
-  than that needs real job isolation and auth, not this page.
+- **Delete book** (tap twice) removes a finished or stopped book from the list.
+  It is moved to `output/web/.trash/<run>`, not erased: move it back to
+  restore it, or empty the folder to free the space. A book being written
+  must be stopped first.
+- **The seed review's work is in Files.** The kept expanded seed is `seed.md`;
+  the review report (`interim/seed_review.md`) and each round's expansion,
+  including one the code check rejected (`seed_round_NN_rejected.md`), are
+  listed too, as is each chapter's web fact-check
+  (`interim/search_chapter_NN.md`: the claims, queries, verdicts and results).
+- **Read a book in the browser.** Once chapters exist, the Files box gains an
+  *open book (live HTML)* link: the whole book as one self-contained page
+  (`GET /api/runs/<id>/book`), re-rendered from the current chapters on every
+  load — so it works mid-run, in light or dark. The type is set like a printed
+  book: justified and hyphenated, drop caps, scene-break ornaments, and A−/A+
+  buttons in the corner resize the text live (remembered per browser).
+- **One book at a time, no accounts.** Bind it to `127.0.0.1`, or set
+  `BOOKWRITER_TOKEN=<secret>` to require a shared token: open
+  `http://<host>:8000/?token=<secret>` once per browser (it is kept in a
+  cookie; scripts can send an `X-Bookwriter-Token` header instead). More than
+  that needs real job isolation and auth, not this page.
+- **Your API key stays out of the run folders.** A literal `llm.api_key` is
+  removed from each run's `config.yaml` and handed to the run through its
+  environment (`LLM_API_KEY`), and the page only downloads the files it lists
+  (the book, seed, bible, EPUB and chapters), never a run's config or state.
 
 ## Docker
 
@@ -377,9 +441,17 @@ cp config.example.yaml config.yaml   # once, then edit llm.base_url / llm.model
 docker compose up --build            # http://localhost:8000
 ```
 
-**Port 8000 is published on every interface** (`8000:8000`) and the page has no
-authentication: use it on a trusted network, or put a reverse proxy with auth in
-front of it, or change the mapping back to `127.0.0.1:8000:8000`.
+**Port 8000 is published on every interface** by default, so a phone on the same
+network or tailnet (Tailscale) can open `http://<host>:8000`. The GUI has no
+accounts; on a network you don't trust, set a token, or keep it on this machine:
+
+```bash
+BOOKWRITER_TOKEN=some-long-secret docker compose up
+# then open http://<host>:8000/?token=some-long-secret once per browser
+BOOKWRITER_BIND=127.0.0.1 docker compose up   # this machine only
+```
+
+(or put the variables in `.env`). A reverse proxy with its own auth works too.
 
 Two things differ from running on the host:
 
@@ -542,12 +614,15 @@ All agents share a central `context` dict: `seed`, `title`, `bible`,
 
 `config.yaml` is loaded and applied; every option, with its default, is
 documented in [`config.example.yaml`](config.example.yaml). Every key is
-optional. Keys:
+optional. A misspelled key is reported at startup, and so is a value of the
+wrong type (`revision_rounds: two`, `stream: "maybe"`): it falls back to its
+default with a `[CONFIG]` warning instead of crashing the run later. Keys:
 
-- **book**: `auto_chapters`/`min_chapters`/`max_chapters` (LLM-suggested chapter count and its clamp), `num_chapters` (fallback), `words_per_chapter` (target length), `word_count_tolerance` (enforced minimum as a fraction of the target — short chapters are lint findings and get sent back for substantive expansion, never padding), `extra_length_rounds` (additional revision rounds granted for length only, while each round still adds ≥15%), `revision_rounds` (review/revise passes per chapter; 0 disables revision), `summary_window` (how many recent chapter summaries the writer/reviewer see in full; older ones are cut to a sentence), `review_as_you_go` (see [Review as you go](#review-as-you-go)), `review_checks` and `repetition_lint` (see [Review quality](#review-quality)), `name_lint_ignore` (words the name-typo lint must never flag), `extraction_checks` (see [Review quality](#review-quality))
-- **llm**: `base_url`, `api_key` (`""`, plain value, or `env:VAR`; `LLM_API_KEY` env var is the fallback), `model`, `timeout` (per request), `retries` (with backoff), `max_tokens` (optional per-request cap; replies cut off by a length limit are continued automatically), `endpoint_wait` (seconds to wait for a downed/reloading server before aborting a phase), `reasoning_effort` (`""`, `low`, `medium`, `xhigh` = the maximum; sent as `chat_template_kwargs.reasoning_effort` for Qwen3.8-style thinking models. When set, the researcher and extractor default to `low` and the reviewer to `medium`; the other stages use the value as set. Empty sends no thinking controls to anyone), `enable_thinking` (`true`/`false`; sent as `chat_template_kwargs.enable_thinking` when set; reportedly unsupported on Qwen3.8), `stream`, `json_mode` and `context_window` (see [Observability](#observability))
-- **agents**: per-agent `model` (default `llm.model`; each must exist on the same server and is checked at startup), `reasoning_effort` / `enable_thinking` / `max_tokens` (override the `llm.*` value; an empty `reasoning_effort:` sends nothing for that agent). The researcher, extractor, verifier and reviewer, which only produce short structured replies, have a built-in output ceiling (6000 / 6000 / 2000 / 8000 tokens) unless you set `max_tokens`: a model that loops while writing JSON otherwise never stops and `temperature` for `seed_reviewer` (the seed review), `architect`, `planner`, `researcher`, `verifier` (judging search results and the second check), `writer`, `extractor` (per-chapter JSON continuity extraction), `reviewer`, `editor` — only sent when set; otherwise the server/model default applies — and `enabled` for `researcher`/`reviewer`/`editor` (disable them to speed things up)
-- **web_search**: `enabled`, `searxng_url`, `auto_start`, `docker_image`, `queries_per_chapter`, `results_per_query`, `snippet_chars`, `categories`, `timeout`, `double_check`, `banned_terms`, `block_character_names` (see [Web fact-checking](#web-fact-checking-optional))
+- **book**: `auto_chapters`/`min_chapters`/`max_chapters` (LLM-suggested chapter count and its clamp), `num_chapters` (fallback), `words_per_chapter` (target length), `word_count_tolerance` (enforced minimum as a fraction of the target — short chapters are lint findings and get sent back for substantive expansion, never padding), `extra_length_rounds` (additional revision rounds granted for length only, while each round still adds ≥15%), `max_length_ratio` (chapters over this multiple of the target get one tightening pass; 0 = never; see [Review quality](#review-quality)), `revision_rounds` (review/revise passes per chapter; 0 disables revision), `summary_window` (how many recent chapter summaries the writer/reviewer see in full; older ones are cut to a sentence), `review_as_you_go` (see [Review as you go](#review-as-you-go)), `review_checks` and `repetition_lint` (see [Review quality](#review-quality)), `name_lint_ignore` (words the name-typo lint must never flag), `extraction_checks` (see [Review quality](#review-quality)), `style` (deterministic style lint: banned stock phrases, hedging, flat rhythm, POV/tense slips, British spelling; see [Review quality](#review-quality))
+- **llm**: `base_url`, `api_key` (`""`, plain value, or `env:VAR`; `LLM_API_KEY` env var is the fallback), `model`, `timeout` (per request), `retries` (with backoff), `max_tokens` (optional per-request cap; replies cut off by a length limit are continued automatically), `endpoint_wait` (seconds to wait for a downed/reloading server before aborting a phase), `reasoning_effort` (`""`, `low`, `medium`, `xhigh` = the maximum; sent as `chat_template_kwargs.reasoning_effort` for Qwen3.8-style thinking models. When set, the researcher and extractor default to `low` and the reviewer to `medium`; the other stages use the value as set. Empty sends no thinking controls to anyone), `enable_thinking` (`true`/`false`; sent as `chat_template_kwargs.enable_thinking` when set; reportedly unsupported on Qwen3.8), `stream`, `stream_max_seconds`, `json_mode` and `context_window` (see [Observability](#observability)), `sampling` (extra sampler fields sent verbatim; llama.cpp/Ollama only, see [Observability](#observability))
+- **agents**: per-agent `model` (default `llm.model`; each must exist on the same server and is checked at startup), `reasoning_effort` / `enable_thinking` / `max_tokens` / `sampling` (override the `llm.*` value; an empty `reasoning_effort:` sends nothing for that agent). The researcher, extractor, verifier and reviewer, which only produce short structured replies, have a built-in output ceiling (6000 / 6000 / 2000 / 8000 tokens) unless you set `max_tokens`: a model that loops while writing JSON otherwise never stops and `temperature` for `seed_reviewer` (the seed review), `architect`, `planner`, `researcher`, `verifier` (judging search results and the second check), `writer`, `extractor` (per-chapter JSON continuity extraction), `reviewer`, `editor` — only sent when set; otherwise the server/model default applies — and `enabled` for `researcher`/`reviewer`/`editor` (disable them to speed things up)
+- **Endpoint variables**: `BOOKWRITER_LLM_BASE_URL` and `BOOKWRITER_SEARXNG_URL`, when set, replace `llm.base_url` and `web_search.searxng_url` for every run, CLI and web GUI alike (`load_config` prints a `[CONFIG]` line saying so). Where the servers are is a fact about the machine, not the book. Example: a SearXNG container on a Docker network publishes no port, so on the host run `BOOKWRITER_SEARXNG_URL=http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' searxng):8080 uv run main.py --seed ...`. The CLI also reads `.env` next to `main.py` (the file `docker compose` reads), so API keys such as `TINYFISH_API_KEY`, `PARALLEL_API_KEY` and `LLM_API_KEY` put there once work for both; variables already in the environment win, and only names, never values, are printed. An endpoint variable in `.env` whose host does not resolve on the host (`host.docker.internal`, a compose service name like `searxng`) is skipped for the CLI with a `[CONFIG]` line, and `config.yaml`'s address is used. An address that works on both sides, such as the SearXNG container's IP on its Docker network, serves the CLI and the container alike. `.env` is in `.dockerignore`, so keys are never baked into the image.
+- **web_search**: `enabled`, `searxng_url`, `auto_start`, `docker_image`, `queries_per_chapter`, `results_per_query`, `snippet_chars`, `categories`, `timeout`, `double_check`, `banned_terms`, `block_character_names`, `min_interval`, `providers`, `parallel_url`, `parallel_api_key`, `tinyfish_url`, `tinyfish_api_key` (see [Web fact-checking](#web-fact-checking-optional))
 - **output**: `directory`, `filename`, `overwrite` (`false` appends `-1`, `-2`, ... instead of clobbering), `interim` (progress artifacts under `<directory>/interim/`), `log` (copy console output to `<directory>/logs/run-<time>.log`)
 
 Misspelled or unknown options are not silently ignored: at startup each one is reported with a suggestion, e.g. `[CONFIG] unknown key 'book.revision_round' is ignored (did you mean 'revision_rounds'?)`.
@@ -589,12 +664,41 @@ continuity checks (deaths, who has met, timeline) there are:
   adds the missing beat as a short passage.
 - **Judging a revision**: a revision (or polish) is kept only if it does not
   make the chapter worse by *severity*, not by a raw count of findings. A
-  continuity error weighs 5, a missed outline beat, broken constraint or short
-  chapter 3, a name typo 2, a banned word, quota or repeated phrase 1. So a
-  revision that fixes a dead character walking about but trips two word quotas
-  is accepted. A revision that grows the chapter by more than 10% (a length
-  expansion, an added beat) is reviewed again even if the draft passed, because
-  new material can contradict the story.
+  continuity error weighs 5, a missed outline beat or broken constraint 3, a
+  name typo or point-of-view slip 2, a banned word, quota or repeated phrase 1.
+  Length weighs nothing here (quality over quantity): a short chapter can
+  still earn expansion rounds, but a tighter revision that fixes a real
+  finding is kept even under the minimum. A shorter revision that fixes
+  nothing is not, and a revision or polish that loses a quarter (a polish:
+  15%) of the chapter *and* goes under the length the book asks for (a
+  revision: the minimum; a polish: the target) is treated as truncated and
+  thrown away. So a 3,189-word chapter may be tightened to 2,200, but a
+  1,806-word chapter polished down to 438 is refused. A revision that fixes a
+  dead character walking about but trips two word quotas is accepted. A
+  revision that changes the chapter's length by more than 10% either way (a
+  length expansion, an added beat, a tightening) is reviewed again even if the
+  draft passed, because new material can contradict the story and cut material
+  can be a missing outline beat.
+- **Over-long chapters**: some models ignore the length they are asked for (a
+  27B model asked for 1,400-1,700 words wrote 1,803-3,189). A chapter over
+  `book.max_length_ratio` times the target (default 1.5; 0 = never) gets one
+  tightening pass inside the normal revision rounds: cut repetition and
+  over-described beats, keep every scene. The tightened version is rejected
+  if it drops a character the chapter had, an outline beat (the re-review) or
+  anything else the lint or reviewer catches; then the long chapter is kept.
+  The lint report marks such chapters **LONG**. Setting a low `max_tokens`
+  does not shorten chapters: the writer continues a reply cut at the limit. A revision that fixes nothing (same
+  severity, and no growth while expanding for length) is kept but ends the
+  rounds: another try on the same findings rarely does better.
+- **Checking the reviewer**: an issue whose description quotes the chapter
+  (15+ characters in quotes) is dropped when none of its quotes is really in
+  the chapter, so invented evidence can't send a sound chapter back. Issues
+  without quotes (a missing outline beat) are kept.
+- **Checking the polish**: the polish pass is not reviewed, so a polish that
+  uses a name mid-sentence that the chapter never contained (a renamed
+  character, an invented place) is rejected in code and the pre-polish text
+  kept. The polish is a copy-edit of the chapter body, and it is shown the
+  banned words, quotas and `book.style` rules the guard will measure it by.
 - **Unreadable reviews**: if the reviewer's reply can't be read, the chapter is
   marked **not reviewed** rather than passed: `review_chapter_NN.md`, the
   edit diff, `lint_report.md` and the end-of-run summary all say so. If a
@@ -604,6 +708,41 @@ continuity checks (deaths, who has met, timeline) there are:
   or more words already used twice in earlier chapters is reported and the
   reviser rewords it; `lint_report.md` also lists phrases repeated across the
   whole book. Character names and function words don't count.
+- **Scene checks** (`shared/scene_checks.py`, always on): two outline facts
+  a reviewer let through, checked in code. *Who is in the chapter*: when the
+  outline lists a chapter's people ("Couples: Angela & Pete visiting Stuart &
+  Kirsty", "Characters: ..."), a story-bible character outside that list who
+  acts in the narration three or more times (speaks, nods, reaches for the
+  wine) is a `cast` finding, and the chapter goes back to the reviser.
+  Mentions, memories and talk about someone are fine. *Where the book is*:
+  when the seed or the bible's setting names a UK county ("rural Hampshire"),
+  narration that names another ("a heavy, Somerset rain") is a `place`
+  finding; dialogue is left alone. The writer is told both before drafting.
+  An outline with no cast field, or one that names nobody ("All three
+  couples"), and a seed with no county, are not checked.
+- **Style lint** (`book.style`): the same deterministic loop, pointed at prose
+  rather than continuity. Every rule is opt-in, so an empty `book.style` block
+  (the default) adds nothing. `banned_phrases` catches the stock phrases a model
+  returns to (measured on 26B Gemma-family finetunes: "coil of", "fullness",
+  "reclamation", "devastatingly"); `max_hedges_per_1000` catches vague
+  narration ("seemed to", "a sense of"); `min_sentence_cv` catches metronomic
+  sentence rhythm; `pov` and `tense` catch a chapter that slips out of the
+  book's person or tense; both judge the narration only (quoted dialogue and
+  *italic thoughts* are left out, since characters speak in the first person
+  and present tense). Books are narrated in the **third person** by default,
+  and that is checked on every chapter even without `pov`: a chapter whose
+  narration turns to "I" is sent back, and the writer is told the person
+  before drafting. For a first-person book, set `pov: first` or say so in the
+  seed ("first-person narrator", "POV: first person").
+  `spelling: british` flags American spellings and words ("color",
+  "neighbor", "realize", "toward", "sidewalk", "gotten") and tells the writer
+  and polish pass to use British ones. It uses -ise, not Oxford -ize, and
+  leaves alone words with a different British meaning (pants, fall, check).
+  Phrases match whole words ("sigh" does not count "sight"). Findings are
+  advisory (severity 1-2), the reviser is
+  told exactly what to change, and the polish guard still keeps whichever
+  version measures better. `tools/style_eval.py` measures the same numbers on a
+  model before you pick thresholds.
 - **Edit diffs**: `output/interim/diff_chapter_NN.md` shows, per chapter, the
   sentence-level diff from draft to final, the lint findings it started with and
   every decision the editor took (revision accepted or rejected and why, polish
@@ -639,7 +778,9 @@ continuity checks (deaths, who has met, timeline) there are:
 - **Streaming** (`llm.stream: true`): replies are streamed, a progress line
   (tokens so far, tokens/s) is printed every ~20 s, and `llm.timeout` becomes
   the time allowed *without any data*, so a stalled server is noticed in
-  seconds. Off by default.
+  seconds. Off by default. `llm.stream_max_seconds` caps one whole streamed
+  reply (a model that loops while trickling tokens otherwise never times out);
+  a reply over the cap is retried like any failed call.
 - **Context-window guard** (`llm.context_window: <tokens>`): a warning, once per
   agent, when a prompt reaches 90% of the window (characters per token is
   calibrated from the usage the server reports). A context-overflow error from
@@ -648,6 +789,27 @@ continuity checks (deaths, who has met, timeline) there are:
   (architect, extractor, reviewer, chapter-count suggestion, verdict check) ask
   the server to enforce it. Array replies and prose are never constrained. If
   the server rejects it, the run carries on without it.
+- **Sampler controls** (`llm.sampling`): extra sampler fields (`min_p`, `top_k`,
+  `top_p`, `repeat_penalty`, `repeat_last_n`, the `dry_*` family, `xtc_*`,
+  `typ_p`, `dynatemp_*`) sent **verbatim** on prose requests. They are not
+  sent to the JSON-only agents (`extractor`, `verifier`, `reviewer`) or to any
+  JSON-object call, since repetition penalties fight JSON's repeated keys.
+  The `editor` (revisions, the polish) and the `seed_reviewer` (expanding the
+  seed) get the block **without** its repetition penalties (`repeat_*`,
+  `presence/frequency_penalty`, `dry_*`, `xtc_*`): they reproduce text that is
+  already in their context, which is what those penalties punish. With DRY on,
+  the polish fused and garbled words the draft never had ("againsther",
+  "unremarkableRE"). As a backstop, the editor splits a fused word back when
+  the text it was given has the two words side by side, and rejects a
+  revision or polish that brings in mid-word capitals.
+  `agents.<name>.sampling` replaces the block for one agent (`{}` sends
+  nothing, or give the reviewer a block of its own). Only the keys you
+  write are sent, and only llama.cpp / Ollama family servers understand them;
+  OpenAI rejects unknown request fields, so leave the block out for a hosted
+  API. `temperature` stays per agent (`agents.<name>.temperature`). Measured on
+  a local fiction model, temp 1.0 was purple and cliché-heavy; temp 0.85-0.9,
+  `min_p: 0.1` and DRY cut the stock phrasing without touching the weights.
+  `tools/style_eval.py` can sweep these settings against a model.
 
 ## Prompts
 
@@ -656,10 +818,16 @@ Every agent has a system prompt (role and rules) in
 writer, extractor, reviewer, reviser and polisher. Agents that need the story
 bible get it in the *system* message rather than the user message. The bible
 is identical for every call, so servers with prompt caching (llama.cpp, vLLM)
-reuse it instead of re-reading it for each chapter. Each chapter's prompt also
-carries the last ~180 words of the previous chapter so voice and transitions
-carry over. To change how a stage behaves (voice, POV, tone rules), edit its
-prompt there.
+reuse it instead of re-reading it for each chapter. The same goes for the
+writer's `book.style` rules (the writer is told what each chapter will be
+linted for) and the researcher's copy of the whole outline (so a brief can say
+what to set up for later chapters). Each chapter's prompt also carries the last
+~180 words of the previous chapter so voice and transitions carry over, and the
+next chapter's outline entry as a boundary: the writer is told to stop where
+its own chapter ends and to hit every beat of its lore brief. Material the
+model works on (a chapter, a seed) is wrapped in `<chapter>`/`<brief>` tags
+rather than triple quotes, which broke when the text itself contained them. To
+change how a stage behaves (voice, POV, tone rules), edit its prompt there.
 
 The writer also guards against unusable replies: an empty, far-too-short, or
 refusal-style response is retried once, and if it fails again the writing
@@ -678,6 +846,19 @@ web_search:
   searxng_url: "http://localhost:8888"
   auto_start: ask        # ask | yes | no
 ```
+
+**Parallel as well (or instead).** `providers: [searxng, parallel]` also
+asks [Parallel](https://parallel.ai)'s search, through its MCP server
+(`https://mcp.parallel.ai/mcp`, spoken directly over HTTP: no extra
+dependency). It is sent the claim being checked as well as the query, and
+returns the passages of each page that address it, which is what the
+verifier needs to quote. It works without a key at a free rate limit;
+`parallel_api_key` (or `PARALLEL_API_KEY`) raises it. The claim passes the
+same screen as a query (character names, `banned_terms`), or the query is
+sent in its place. `tinyfish` adds [TinyFish](https://tinyfish.ai) Search
+the same way (the claim goes as its `purpose`); it needs a key, read from
+`TINYFISH_API_KEY` (or `tinyfish_api_key`). Results from every provider are
+merged, one per URL, and a provider failing leaves the others.
 
 **Setup.** Nothing to install if you have Docker. With `enabled: true`, if
 SearXNG isn't reachable at a local URL the app offers to download and start

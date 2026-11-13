@@ -1,7 +1,8 @@
 """Unit tests for the deterministic consistency linter."""
 
 from shared.consistency import (extract_banned_words, extract_quotas,
-                                lint_chapter, word_count, word_count_finding)
+                                lint_chapter, style_findings, style_metrics,
+                                word_count, word_count_finding)
 
 USER_CONSTRAINTS = [
     'British English. Never the words "unhurried", "unrushed", or "exactly".',
@@ -154,3 +155,251 @@ def test_dead_character_false_positives_avoided():
 def test_word_count_finding_has_structured_fields():
     finding = word_count_finding("word " * 10, 100, 0.8)
     assert finding["count"] == 10 and finding["minimum"] == 80
+
+
+# ------------------------------------------------------------- style lint
+
+STYLE = {
+    "banned_phrases": ["coil of", "reclamation"],
+    "max_phrase_hits": 1,
+    "max_hedges_per_1000": 4,
+    "min_sentence_cv": 0.30,
+}
+
+
+def test_an_empty_style_block_adds_nothing():
+    """The default is `style: {}`; it must not change any existing book."""
+    text = "The coil of heat. The coil of need. Somehow it seemed to matter."
+    assert style_findings(text, {}) == []
+    assert style_findings(text, None) == []
+
+
+def test_banned_phrase_over_the_limit_is_flagged():
+    text = ("A coil of rope. Another coil of smoke. A third coil of hair. "
+            + "The room was quiet. " * 12)
+    findings = style_findings(text, STYLE)
+    flagged = [f for f in findings if f["check"] == "banned_phrase"]
+    assert flagged and "coil of" in flagged[0]["detail"]
+
+
+def test_a_phrase_within_the_limit_is_not_flagged():
+    text = ("A single coil of rope. " + "The room was quiet and empty. " * 12)
+    findings = style_findings(text, STYLE)
+    assert not [f for f in findings if f["check"] == "banned_phrase"]
+
+
+def test_hedging_above_the_configured_rate_is_flagged():
+    text = ("It seemed to be late. She somehow knew. A sense of dread came. "
+            "He almost as if waited. " + "The clock ticked past noon. " * 20)
+    findings = style_findings(text, {"max_hedges_per_1000": 2})
+    assert any(f["check"] == "hedging" for f in findings)
+
+
+def test_flat_sentences_are_flagged_and_varied_ones_are_not():
+    flat = ("He walked to the door. She opened the door. He walked inside. "
+            "She closed the door. He sat down. She sat down too.")
+    varied = ("He walked to the door. She opened it. Outside, the rain had "
+              "stopped, and the whole street smelled of wet stone and diesel. "
+              "He stepped out. She did not follow. A bus passed. The street "
+              "was empty again, and he stood in it until he was cold.")
+    assert any(f["check"] == "flat_prose"
+               for f in style_findings(flat, {"min_sentence_cv": 0.30}))
+    assert not [f for f in style_findings(varied, {"min_sentence_cv": 0.30})
+                if f["check"] == "flat_prose"]
+
+
+def test_pov_slip_is_flagged_only_when_clear():
+    first_person = ("I opened the door. I saw the body. My hands were wet. "
+                    "I knew the man. I had met him before. I took the letter. "
+                    "I could not stay. I left.")
+    assert any(f["check"] == "pov"
+               for f in style_findings(first_person, {"pov": "third"}))
+    assert not [f for f in style_findings(first_person, {"pov": "first"})
+                if f["check"] == "pov"]
+
+
+def test_lint_chapter_passes_style_through():
+    bible = {"characters": [{"name": "Aria"}]}
+    text = ("A coil of rope. Another coil of smoke. A third coil of hair. "
+            "And another coil of wire. " + "The room was quiet. " * 12)
+    plain = lint_chapter(1, text, bible, [])
+    styled = lint_chapter(1, text, bible, [], style=STYLE)
+    assert not [f for f in plain if f["check"] == "banned_phrase"]
+    assert any(f["check"] == "banned_phrase" for f in styled)
+
+
+def test_style_metrics_match_the_eval_tool():
+    """The pipeline and tools/style_eval.py must score the same text the same
+    way, or a threshold picked on the battery means nothing in the editor."""
+    from tools.style_eval import (hedge_per_1k, sentence_cv, stock_per_1k)
+    text = ("A coil of smoke. Somehow it seemed to matter. The room was "
+            "quiet. It was very quiet. Nobody spoke. Nobody moved at all.")
+    assert style_metrics(text)["sentence_cv"] == sentence_cv(text)
+    assert style_metrics(text)["hedges_per_1000"] == hedge_per_1k(text)
+    assert stock_per_1k(text) >= 1.0
+
+
+# ------------------------------------------- style checks: false positives
+
+def test_dialogue_does_not_decide_the_point_of_view():
+    """Regression: a third-person, past-tense narration with first-person,
+    present-tense dialogue read as first person / present."""
+    from shared.consistency import pov_tense
+    text = ('"I am tired and I need to go, you know I do," she said. '
+            '"I think you are right. I see it," he answered. ') * 6
+    pov, _, tense, _ = pov_tense(text)
+    assert pov == "third"
+    assert tense == "past"
+
+
+def test_words_ending_in_ed_that_are_not_verbs_are_not_past():
+    from shared.consistency import pov_tense
+    text = ("I need the speed. I feed the seed. Indeed I need a hundred. "
+            "I am here. I see it. I know it. ") * 5
+    assert pov_tense(text)[2] == "present"
+
+
+def test_a_sentence_ends_after_a_closing_quote():
+    from shared.consistency import _sentences
+    assert _sentences('"Go." She went. “Now?” He nodded.') == [
+        '"Go."', "She went.", "“Now?”", "He nodded."]
+
+
+def test_banned_phrases_match_whole_words():
+    from shared.consistency import style_metrics
+    metrics = style_metrics("A sigh. The sight of it. Another sigh.",
+                            {"banned_phrases": ["sigh"]})
+    assert metrics["phrase_hits"] == {"sigh": 2}
+
+
+def test_a_bad_style_number_does_not_crash_the_lint():
+    from shared.consistency import style_findings
+    text = "She went home. " * 20
+    assert style_findings(text, {"max_hedges_per_1000": "eight",
+                                 "min_pov_share": None, "pov": "first"}) \
+        is not None
+
+
+def test_introduced_names():
+    from shared.consistency import introduced_names
+    before = "she told marcus about the tower in london."
+    assert introduced_names(before, "She told Marcus about the tower in "
+                            "London.") == []
+    assert introduced_names(before, "She told Darius about the tower in "
+                            "London.") == ["Darius"]
+
+
+def test_style_rules_lists_what_the_lint_checks():
+    from shared.consistency import style_rules
+    rules = style_rules(
+        {"banned_phrases": ["coil of"], "max_phrase_hits": 2,
+         "max_hedges_per_1000": 8, "pov": "first", "tense": "present"},
+        ['Never the words "unhurried" or "exactly".',
+         "Em-dash rare - max 8 per scene"])
+    text = "\n".join(rules)
+    assert '"unhurried"' in text and '"exactly"' in text
+    assert "At most 8 em dashes per chapter." in text
+    assert '"coil of"' in text and "at most 2 each" in text
+    assert "first person" in text and "present tense" in text
+    assert "hedges" in text.lower()
+
+
+def test_style_rules_are_empty_without_rules():
+    from shared.consistency import style_rules
+    assert style_rules({}) == []
+    assert style_rules({"enabled": False, "pov": "first"}) == []
+    assert style_rules(None, ["Keep it light."]) == []
+
+
+def test_fused_words_are_split_back_to_the_source_text():
+    """Regression: a polish copied "against her" as "againsther"."""
+    from shared.consistency import repair_fused_words
+    before = "He whispered against her ear. Rain fell."
+    text, fixes = repair_fused_words(before, "He whispered againsther ear. Rain fell.")
+    assert text == before and fixes == [("againsther", "against her")]
+
+
+def test_only_fusions_of_words_the_source_had_side_by_side_are_repaired():
+    from shared.consistency import repair_fused_words
+    before = "She took the train home."
+    # 'nothing' is new but 'no thing' was never in the source: left alone
+    assert repair_fused_words(before, "Nothing. She took the train home.")[1] == []
+    # a word already in the source is never touched
+    assert repair_fused_words("a rainbow and a rain bow",
+                              "a rainbow and a rainbow")[1] == []
+
+
+def test_garbled_words_are_new_mixed_case_debris():
+    from shared.consistency import garbled_words
+    before = "An unremarkable week with McGregor and his iPhone."
+    after = "An unremarkableRE week with McGregor, his iPhone and a MacBook."
+    assert garbled_words(before, after) == ["unremarkableRE"]
+
+
+# ------------------------------------------------------- narrative person
+
+_THIRD = "He walked to the door and she followed him into the rain. " * 20
+_FIRST = "I walked to the door and my hands shook in the rain again. " * 20
+
+
+def test_chapter_person_ignores_dialogue_and_italic_thoughts():
+    from shared.consistency import chapter_person
+    speech = ('"I know," he said. "My mind is made up." *I can\'t,* he '
+              'thought. ')
+    assert chapter_person(_THIRD + speech * 5) == "third"
+    assert chapter_person(_FIRST) == "first"
+    assert chapter_person(_THIRD * 5 + "I went. " * 6) == "mixed"
+    assert chapter_person("Too short. I went.") == ""
+
+
+def test_a_part_way_slip_is_caught_where_the_pronoun_share_is_not():
+    """Regression: a chapter that turned to "I" part-way still read 69% third
+    person by pronoun share (narrators talk about "she" a lot), so
+    book.style.pov: third let it through."""
+    from shared.consistency import pov_slip_finding
+    text = _THIRD + "\n\n" + _THIRD + "\n\n" + _FIRST
+    found = [f for f in style_findings(text, {"pov": "third"})
+             if f["check"] == "pov"]
+    assert found and "paragraph 3 of 3" in found[0]["detail"]
+    assert pov_slip_finding(_THIRD, "third") is None
+    assert pov_slip_finding(_FIRST, "first") is None
+    assert pov_slip_finding(_THIRD, "first")["check"] == "pov"
+
+
+def test_book_pov_is_third_person_unless_config_or_seed_says_otherwise():
+    from shared.consistency import book_pov, stated_pov
+    assert stated_pov("Third-person limited, past tense.") == "third"
+    assert stated_pov("Single POV (Stuart).") is None
+    assert stated_pov("first person POV, then third-person narration") is None
+    assert stated_pov("POV: first person, past tense.") == "first"
+    assert stated_pov("Kirsty was the first person to arrive.") is None
+    assert book_pov({}, ["Single POV (Stuart)."]) == ("third", "the default")
+    assert book_pov({}, []) == ("third", "the default")
+    assert book_pov({}, ["A first-person narrator."]) == ("first", "the seed")
+    assert book_pov({"pov": "first"}, ["third person"]) == \
+        ("first", "book.style.pov")
+    assert book_pov({"pov": "second"}, []) == (None, "")
+
+
+def test_word_count_finding_flags_a_chapter_over_the_maximum():
+    from shared.consistency import word_count_finding
+    finding = word_count_finding("word " * 160, 100, 0.8, max_ratio=1.5)
+    assert finding["check"] == "too_long"
+    assert (finding["count"], finding["maximum"], finding["target"]) == (160, 150, 100)
+    assert word_count_finding("word " * 150, 100, 0.8, max_ratio=1.5) is None
+    assert word_count_finding("word " * 999, 100, 0.8, max_ratio=0) is None
+
+
+def test_max_length_is_never_under_what_the_writer_is_asked_for():
+    from shared.consistency import max_length
+    assert max_length(1600, 1.5) == 2400
+    assert max_length(1600, 1.0) == 1920          # 1.2x: the writer's own ceiling
+    assert max_length(1600, 0) == 0
+
+
+def test_dropped_names_matches_any_part_of_a_name():
+    from shared.consistency import dropped_names
+    names = ["Mara Vance", "Tom", "Elias Crane"]
+    before = "Mara spoke. Tom nodded. Crane watched."
+    assert dropped_names(before, "Vance spoke. Crane watched.", names) == ["Tom"]
+    assert dropped_names(before, before, names) == []

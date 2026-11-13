@@ -80,6 +80,31 @@ def _find_outline_span(lines):
     return None
 
 
+_BOLD_LINE_RE = re.compile(r"^\*\*[^*]+\*\*:?$")
+
+
+def _loose_outline_span(lines):
+    """The block of lines from the first 'Chapter N' line to the end of the
+    last one's notes, or None. Used only when the chapter lines form one
+    block: a level 1-2 heading between them means they sit in different
+    sections, and their notes can't be told from the sections' text. The
+    block ends at the next such heading or at a bold-only line ('**Themes:**')
+    that is not itself a chapter."""
+    found = [i for i, line in enumerate(lines) if _parse_chapter_line(line)]
+    if len(found) < 2:
+        return None
+    first, last = found[0], found[-1]
+    if any((_header_level(line) or 9) <= 2 for line in lines[first:last]):
+        return None
+    end = len(lines)
+    for j in range(last + 1, len(lines)):
+        line = lines[j].strip()
+        if (_header_level(lines[j]) or 9) <= 2 or _BOLD_LINE_RE.match(line):
+            end = j
+            break
+    return lines[first:end]
+
+
 def _parse_outline_span(span):
     """Parse the lines of an outline section into chapter dicts.
 
@@ -112,8 +137,11 @@ def _parse_outline_span(span):
                              "summary": summary, "part": current_part})
             continue
         if chapters:  # wrapped continuation or fold-in beat
+            # "* **Plot:** ..." -> "Plot: ...": markup means nothing in a summary
+            piece = re.sub(r"^(?:[-\u2022]|\*(?!\*))\s*", "", stripped)
+            piece = piece.replace("**", "")
             chapters[-1]["summary"] = (chapters[-1]["summary"]
-                                       + " " + stripped).strip()
+                                       + " " + piece).strip()
     return chapters
 
 
@@ -151,7 +179,15 @@ def extract_seed_outline(seed_text):
         if chapters:
             return _sanitize_numbers(chapters)
 
-    # Pass 2: loose scan for explicit "Chapter N" lines anywhere
+    # Pass 2: explicit "Chapter N" lines without an Outline heading (e.g. under
+    # "**Plot Roadmap:**"). The lines under each one are its summary: taking
+    # the chapter lines alone gave every chapter an empty summary, and the
+    # seed's outline wins over the planner's, so the writer got none.
+    span = _loose_outline_span(lines)
+    if span is not None:
+        chapters = _parse_outline_span(span)
+        if len(chapters) >= 2:
+            return _sanitize_numbers(chapters)
     loose = [p for p in (_parse_chapter_line(ln) for ln in lines) if p]
     if len(loose) >= 2:
         return _sanitize_numbers(
@@ -194,7 +230,7 @@ def _plan_with_llm(bible, target, fixed_prefix=None):
 
     seed = str(bible.get("seed") or context.get("seed") or "")
     seed_block = (f"THE AUTHOR'S BRIEF (the story material to distribute across "
-                  f"the chapters):\n\"\"\"{seed[:16000]}\"\"\"\n\n"
+                  f"the chapters):\n{prompts.fence(seed[:16000], 'brief')}\n\n"
                   if seed else "")
     answers = [c for c in bible.get("clarifications") or [] if c.get("answer")]
     answers_block = ("AUTHOR'S CLARIFICATIONS:\n" + "\n".join(
@@ -284,7 +320,7 @@ Decide how many chapters the book should have.
 Return ONLY JSON: {{"chapters": <integer>, "reason": "one sentence"}}
 
 Creative seed:
-\"\"\"{seed_text[:6000]}\"\"\"
+{prompts.fence(seed_text[:6000], "brief")}
 """
     try:
         data = extract_json(

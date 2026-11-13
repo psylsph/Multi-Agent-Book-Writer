@@ -12,3 +12,4 @@ config.yaml
 tests
 tools
 images
+.env

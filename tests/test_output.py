@@ -60,7 +60,7 @@ def test_save_chapter_writes_durable_file(tmp_path):
     assert path is not None
     assert path == out / "chapters" / "chapter_03.md"
     text = path.read_text(encoding="utf-8")
-    assert text.startswith("# Chapter 3: The Long Road\n\n")
+    assert text.startswith("## Chapter 3: The Long Road\n\n")
     assert "It was a dark night." in text
 
 
@@ -191,3 +191,59 @@ def test_a_fresh_pipeline_run_archives_before_it_starts(tmp_path, monkeypatch):
     (archive,) = list((out / "archive").iterdir())
     assert (archive / "chapters" / "chapter_01.md").exists()
     assert not (out / "chapters" / "chapter_01.md").exists()
+
+
+def test_a_state_dir_that_cannot_be_archived_stops_the_fresh_run(
+        tmp_path, monkeypatch):
+    """Regression: a failed move of state/ was only printed, and the fresh run
+    then wrote into a state/ still holding the old run's final.json - which a
+    later resume would have shipped as this book's chapters."""
+    import pytest
+
+    import main as pipeline
+    from shared import output
+    out = _use_config(tmp_path)
+    _populate(out)
+    real_move = output.shutil.move
+
+    def move(src, dst):
+        if src.endswith("state"):
+            raise PermissionError("denied")
+        return real_move(src, dst)
+    monkeypatch.setattr(output.shutil, "move", move)
+    with pytest.raises(output.ArchiveError, match="state"):
+        output.archive_previous_run()
+
+    # the pipeline refuses to start on top of the stuck state/
+    monkeypatch.setattr(pipeline, "run_seed_review", lambda *a, **k: pytest.fail(
+        "the run must not start"))
+    assert pipeline.run_pipeline("A seed.", resuming=False) == 1
+    assert (out / "state" / "drafts.json").exists()       # left untouched
+
+
+def test_a_failed_move_of_other_files_does_not_stop_the_run(
+        tmp_path, monkeypatch):
+    from shared import output
+    out = _use_config(tmp_path)
+    _populate(out)
+    real_move = output.shutil.move
+
+    def move(src, dst):
+        if src.endswith("story_bible.md"):
+            raise PermissionError("denied")
+        return real_move(src, dst)
+    monkeypatch.setattr(output.shutil, "move", move)
+    assert output.archive_previous_run() is not None
+
+
+def test_atomic_write_syncs_before_replacing(tmp_path, monkeypatch):
+    from shared import output
+    calls = []
+    real_fsync, real_replace = output.os.fsync, output.os.replace
+    monkeypatch.setattr(output.os, "fsync",
+                        lambda fd: calls.append("fsync") or real_fsync(fd))
+    monkeypatch.setattr(output.os, "replace",
+                        lambda a, b: calls.append("replace") or real_replace(a, b))
+    output.atomic_write_text(tmp_path / "f.txt", "hello")
+    assert calls == ["fsync", "replace"]
+    assert (tmp_path / "f.txt").read_text() == "hello"

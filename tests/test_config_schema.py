@@ -120,3 +120,68 @@ def test_mutable_defaults_are_not_shared(tmp_path):
     path.write_text("")
     load_config(path)["book"]["name_lint_ignore"].append("Zed")
     assert config_schema.DEFAULTS["book"]["name_lint_ignore"] == []
+
+
+def test_nested_style_and_sampling_typos_are_reported():
+    out = config_schema.problems({
+        "book": {"style": {"max_hedge_per_1000": 3}},
+        "llm": {"sampling": {"minp": 0.1}},
+    })
+    assert any("book.style.max_hedge_per_1000" in m for m in out)
+    assert any("llm.sampling.minp" in m and "did you mean 'min_p'" in m
+               for m in out)
+
+
+def test_nested_style_and_sampling_keys_are_accepted():
+    assert config_schema.problems({
+        "book": {"style": {"banned_phrases": ["coil of"], "pov": "third"}},
+        "llm": {"sampling": {"min_p": 0.1, "dry_multiplier": 0.8}},
+    }) == []
+
+
+# ------------------------------------------------------------ value types
+
+def test_a_non_numeric_value_falls_back_to_its_default():
+    """Regression: `revision_rounds: two` (or a style threshold typo) crashed
+    the editor with ValueError hours into a run."""
+    cfg = {"book": {"revision_rounds": "two", "words_per_chapter": "1200",
+                    "style": {"max_hedges_per_1000": "eight",
+                              "min_sentence_cv": 0.3}},
+           "llm": {"timeout": "soon", "max_tokens": "lots"},
+           "agents": {"writer": {"temperature": "warm"}}}
+    out = config_schema.fix_types(cfg)
+    assert cfg["book"]["revision_rounds"] == 2               # the default
+    assert cfg["book"]["words_per_chapter"] == 1200          # "1200" read
+    assert "max_hedges_per_1000" not in cfg["book"]["style"]  # no default
+    assert cfg["book"]["style"]["min_sentence_cv"] == 0.3
+    assert cfg["llm"]["timeout"] == 300
+    assert "max_tokens" not in cfg["llm"]
+    assert "temperature" not in cfg["agents"]["writer"]
+    assert len(out) == 5
+    assert any("book.revision_rounds" in m and "two" in m for m in out)
+
+
+def test_booleans_are_read_and_bad_ones_fall_back():
+    cfg = {"output": {"interim": "false", "log": "maybe"},
+           "book": {"revision_rounds": True}}
+    out = config_schema.fix_types(cfg)
+    assert cfg["output"]["interim"] is False       # a quoted "false" was truthy
+    assert cfg["output"]["log"] is True            # the default
+    assert cfg["book"]["revision_rounds"] == 2     # yes/True is not a number
+    assert len(out) == 2
+
+
+def test_load_config_repairs_and_reports_bad_types(tmp_path, capsys):
+    from shared.llm_client import load_config
+    path = tmp_path / "config.yaml"
+    path.write_text("book:\n  revision_rounds: two\n")
+    cfg = load_config(path)
+    assert cfg["book"]["revision_rounds"] == 2
+    assert "[CONFIG] 'book.revision_rounds' should be a number" in \
+        capsys.readouterr().out
+
+
+def test_agent_sampling_keys_are_checked():
+    out = config_schema.problems({"agents": {"reviewer": {
+        "sampling": {"min_p": 0.1, "minp": 0.1}}}})
+    assert len(out) == 1 and "agents.reviewer.sampling.minp" in out[0]

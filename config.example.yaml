@@ -26,21 +26,38 @@ book:
   #          master seed (output/seed.md) that the book and any restart use.
   #          (Default; behaves like warn without a terminal.)
   #   warn - show the review and carry on with the requested size
+  #   auto - accept every suggested answer, expand the seed with it, and
+  #          review the expanded seed again until the reviewer asks nothing
+  #          more (then use the recommended size if the request still does
+  #          not fit). No terminal needed; at most seed_auto_rounds expansions.
   #   off  - skip it (the planner sizes the book as before)
   seed_review: ask
   seed_questions: 5       # most questions to ask per round (0 = none)
+  # auto only: most expansion rounds before the seed stands as it is. Each
+  # round is a full review + rewrite of the seed, and a model that asks
+  # something every round would otherwise never stop (0 = review only).
+  seed_auto_rounds: 5
 
   # Target length per chapter. The writer is asked for between
   # words_per_chapter * word_count_tolerance and words_per_chapter * 1.2.
   words_per_chapter: 2000
-  # Enforced minimum, as a fraction of words_per_chapter. Shorter chapters are
-  # sent back for substantive expansion (never padding).
+  # A chapter length stated in the seed ("1,500-1,700 words per chapter")
+  # overrides this. Minimum, as a fraction of words_per_chapter: shorter
+  # chapters are sent back for substantive expansion (never padding), but a
+  # shorter revision that fixes a real finding is not rejected for length.
   word_count_tolerance: 0.8
 
   # Review/revise rounds per chapter in the editor (0 disables revision).
   revision_rounds: 2
   # Extra rounds granted ONLY for length expansion, while each still adds >= 15%.
   extra_length_rounds: 2
+  # A chapter longer than words_per_chapter * max_length_ratio gets ONE
+  # tightening pass (inside revision_rounds): cut repetition and over-described
+  # beats, never a scene. A tightened version that drops a character, an
+  # outline beat or a fact is rejected and the long one kept. Length never
+  # makes one version "worse" than another. 0 = never tighten; values under
+  # 1.2 count as 1.2 (the writer is asked for up to 1.2x the target).
+  max_length_ratio: 1.5
 
   # false: write ALL chapters first, then review/revise/polish them all.
   # true:  write, review and polish ONE chapter at a time, then re-extract its
@@ -59,6 +76,34 @@ book:
   # Reword phrases a chapter reuses from earlier ones (6+ word phrases already
   # used twice before; and a book-wide list in lint_report.md).
   repetition_lint: true
+
+  # Style lint (deterministic, feeds the same review/revise loop as the checks
+  # above). Every rule is opt-in: an empty `style:` block (the default) adds no
+  # findings, so leaving it out changes nothing. Measured on a 26B fiction
+  # model, the useful targets were a handful of stock phrases and flat sentence
+  # rhythm; the eval harness in tools/style_eval.py measures the same numbers.
+  #
+  # style:
+  #   banned_phrases:          # stock phrases this book must not reuse
+  #     - "coil of"            #   (case-insensitive, whole phrase)
+  #     - "fullness"
+  #     - "reclamation"
+  #     - "devastatingly"
+  #     - "punishingly"
+  #   max_phrase_hits: 1       # allowed occurrences per chapter, per phrase
+  #   max_hedges_per_1000: 8   # "seemed to", "somehow", "a sense of", ...
+  #   min_sentence_cv: 0.30    # sentence-length variation; flat prose is lower
+  #   pov: third               # first | third | second (omit: third person,
+  #                            #   unless the seed names first person)
+  #   min_pov_share: 0.60      # only flag a clear slip, not a stray pronoun
+  #   tense: past              # past | present (omit to skip)
+  #   min_tense_share: 0.60    # only flag a clear slip
+  #   spelling: british        # flag American spellings/words (color, neighbor,
+  #                            #   realize, sidewalk); -ise, not Oxford -ize
+  #
+  # Findings are advisory (severity 1-2): the reviser is told to fix them, the
+  # polish guard keeps a version that made things worse, and lint_report.md
+  # lists what remains.
 
   # After each chapter's story facts are extracted, cross-check them against
   # the text: drop names the chapter never mentions, don't re-kill a character
@@ -86,6 +131,7 @@ llm:
   #   Ollama                 http://localhost:11434
   #   OpenAI                 https://api.openai.com
   #   OpenRouter             https://openrouter.ai/api
+  # BOOKWRITER_LLM_BASE_URL, when set, replaces this (CLI and web GUI).
   base_url: "http://localhost:1234"
   model: "your-model-name"      # must be a model the server offers
   # API key for hosted services. Leave empty for local servers. Use
@@ -111,11 +157,44 @@ llm:
   # far, tokens/s) every ~20 s, and detects a stalled server in `timeout`
   # seconds instead of waiting out a whole response. Off by default.
   stream: false
+  # With stream on, `timeout` bounds the wait for each chunk, so a model that
+  # loops while trickling tokens never times out. This caps one whole reply
+  # in seconds (it is then retried, like any failed call). Unset: no cap.
+  # stream_max_seconds: 3600
 
   # Ask the server to enforce JSON output on the calls that return a JSON
   # object (architect, extractor, reviewer, ...). Fewer parse failures, but
   # needs server support; if the server rejects it the run carries on without.
   json_mode: false
+
+  # Extra sampler fields, sent VERBATIM on prose requests. Only the keys you
+  # write are sent, and only llama.cpp / Ollama family servers understand them;
+  # OpenAI rejects unknown request fields, so leave this out for a hosted API.
+  # temperature is not set here - use agents.<name>.temperature.
+  #
+  # Measured on a local fiction model: a prose battery at temp 1.0 was purple
+  # and cliche-heavy; temp 0.85-0.9, min_p 0.1 and DRY cut the stock phrasing
+  # without touching the weights. Set agents.<name>.temperature alongside it.
+  #
+  # Not sent to the agents that only reply in JSON (extractor, verifier,
+  # reviewer) or to any JSON-object call: repetition penalties fight JSON's
+  # repeated keys. The editor and seed_reviewer get it without the repetition
+  # penalties (repeat_*, *_penalty, dry_*, xtc_*): they copy text that is in
+  # their context, and DRY made the polish fuse words ("againsther").
+  # agents.<name>.sampling replaces this block for one agent
+  # (e.g. `sampling: {}` to send nothing to the writer, or a block of its own
+  # for the reviewer).
+  #
+  # sampling:
+  #   min_p: 0.1
+  #   top_k: 64
+  #   top_p: 0.95
+  #   repeat_penalty: 1.05
+  #   repeat_last_n: 1024
+  #   dry_multiplier: 0.8       # stops verbatim repeats, not cliches
+  #   dry_base: 1.75
+  #   dry_allowed_length: 3
+  #   dry_penalty_last_n: 1024
 
   # The model's context size in tokens. When set, a prompt that nears it (the
   # bible, facts and recap grow with the book) triggers a warning before the
@@ -138,8 +217,8 @@ llm:
 
 # ---------------------------------------------------------------- agents
 # Per-agent settings. Besides `model` and `temperature` (below) an agent can set
-# its own `reasoning_effort`, `enable_thinking` and `max_tokens`, overriding the
-# llm.* value; an EMPTY `reasoning_effort:` sends no thinking control for that
+# its own `reasoning_effort`, `enable_thinking`, `max_tokens` and `sampling`,
+# overriding the llm.* value; an EMPTY `reasoning_effort:` sends no thinking control for that
 # agent. Example: `writer: {reasoning_effort: xhigh}` and
 # `reviewer: {reasoning_effort: xhigh}` for maximum thinking everywhere.
 #
@@ -220,6 +299,23 @@ agents:
 #   - Needs agents.researcher.enabled: true.
 web_search:
   enabled: false
+  # Where to search, in order; results are merged, one per URL, and a
+  # provider that fails is skipped while another still answers.
+  #   searxng  - the SearXNG instance below (metasearch, no account)
+  #   parallel - Parallel's search (its MCP server, parallel_url). Searches by
+  #              the claim being checked as well as the query, and returns
+  #              the passages that answer it. Works without a key at a free
+  #              rate limit; a key raises it.
+  #   tinyfish - TinyFish Search (tinyfish_url). Needs a key: TINYFISH_API_KEY
+  #              in the environment, or tinyfish_api_key.
+  providers: [searxng]    # e.g. [searxng, parallel, tinyfish] or [parallel]
+  parallel_url: "https://mcp.parallel.ai/mcp"
+  parallel_api_key: ""    # "" (keyless), a key, or "env:VAR"; PARALLEL_API_KEY
+                          # in the environment is used when this is empty
+  tinyfish_url: "https://api.search.tinyfish.ai/"
+  tinyfish_api_key: ""    # "" = TINYFISH_API_KEY from the environment; or
+                          # "env:VAR". Keep keys out of this file if you can.
+  # BOOKWRITER_SEARXNG_URL, when set, replaces this (CLI and web GUI).
   searxng_url: "http://localhost:8888"
   # If SearXNG isn't reachable at a local URL and Docker is installed, the app
   # can start it for you (bound to 127.0.0.1 only):
@@ -246,6 +342,10 @@ web_search:
   snippet_chars: 300      # per result
   categories: "general"
   timeout: 15             # seconds per search
+  # Seconds to leave between queries. An API engine behind SearXNG has a rate
+  # limit (Brave's Search API: about one request a second), and one burst of
+  # a chapter's queries gets the engine suspended for minutes (0 = no wait).
+  min_interval: 1.5
 
 # ---------------------------------------------------------------- output
 output:

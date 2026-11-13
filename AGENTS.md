@@ -52,13 +52,14 @@ shared/
   story_state.py   chronology merge/render, name canonicalisation (pure)
   consistency.py   deterministic lint: banned words, quotas, names, word count, repetition
   extraction_checks.py  grounding/death checks on extracted story state (pure)
+  scene_checks.py  cast (outline's people per chapter), county, British spelling (pure)
   web_search.py    SearXNG client, query filtering, verdict validation, Docker helper
   resume.py        the run's state store (output/state/): save_state, load_state
   output.py        interim artifacts, durable chapters/, archiving, atomic writes
   config_schema.py known config keys; warns about typos
   runlog.py, epub.py
 tools/             offline-from-the-pipeline evaluation harnesses (reviewer, extractor,
-                   verdict) run against real models; not part of a book run
+                   verdict, style) run against real models; not part of a book run
 tests/             pytest; tests/fake_llm.py is an in-process fake OpenAI server
 seeds/             SEED_SCHEMA.md (format) and example_seed.md
 web/               optional GUI: app.py runs one `main.py` subprocess per book
@@ -78,7 +79,8 @@ written, edited and has its story state re-extracted before the next is drafted.
 ## Invariants - do not break these
 
 - **Interactive prompts go through `shared/webanswer.py`.** The seed review
-  (`agents/seed_review.py`'s `_ask(question, default)`) and the SearXNG offer
+  (`agents/seed_review.py`'s `_ask(question, default, details, choices)`, plus
+  `_ask_form(fields)` for a whole round of questions) and the SearXNG offer
   (`shared/web_search.py`'s `_ask`) are the only two stdin seams, and
   `webanswer.install_if_enabled()` (called first in `main.main()`) swaps both for
   a browser file handshake when `BOOKWRITER_ASK_DIR` is set. A new `input()`
@@ -115,13 +117,21 @@ written, edited and has its story state re-extracted before the next is drafted.
   result is already in context.
 - **Never lose generated text.** Writes use `atomic_write_text`; a fresh run
   archives the previous one (`archive_previous_run`) instead of deleting it;
-  revisions/polishes that shrink a chapter or add findings are rejected and the
-  previous version kept.
+  revisions/polishes that truncate a chapter (`MIN_REVISION_RATIO`,
+  `MIN_POLISH_RATIO`, relaxed by `shrink_floor` only down to the length the
+  book asks for), shrink it without fixing anything, drop a character while
+  tightening, or add findings are rejected and the previous version kept.
 - **The master seed.** When the seed review expands the seed, the expansion is
   the seed for everything after it and for any restart (`state/seed.json`:
   `original`, `current`, `pending`). `main.check_resume` accepts the original
   or the master as "the same run". `lost_material()` must keep rejecting an
   expansion that drops a character, constraint or outline chapter.
+- **One chapter length.** A per-chapter length in the seed is parsed
+  (`stated_chapter_words`) and becomes `words_per_chapter`; then
+  `strip_chapter_length` takes it out of the seed, every expansion and the
+  clarifications, so no prompt carries a second, competing length.
+  `main._norm_seed` strips it too, so the author's unstripped file still
+  resumes the run.
 - **Verbatim over LLM transcription.** Seed characters, constraints, author notes
   and outlines are parsed deterministically (`llm_utils.py`, `planner.py`) and
   override what the model returns. Don't route them through the model.

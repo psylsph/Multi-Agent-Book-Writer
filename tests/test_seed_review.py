@@ -277,15 +277,39 @@ def test_an_expansion_that_loses_material_is_not_offered(tmp_path,
     seed = SEED + "\n## Characters\n- **Kirsty** - the host.\n" \
                   "- **Stuart** - her husband.\n"
     _llm(monkeypatch, _assessment(), _assessment(questions=[]))
-    _expander(monkeypatch, seed.replace("- **Stuart** - her husband.\n", "")
-              + "\nMore material " * 20)
+    bad = seed.replace("- **Stuart** - her husband.\n", "") + "\nMore material " * 20
+    calls = _expander(monkeypatch, bad, bad)       # it is asked twice
     _answers(monkeypatch, "a", "an answer", "", "", "d", "")
     out = seed_review.run_seed_review(seed)
     text = capsys.readouterr().out
+    assert "lost material" in text and "asking once more" in text
+    assert "REJECTED" not in calls[0]["prompt"]
+    assert "REJECTED: character(s) no longer listed: Stuart" in calls[1]["prompt"]
     assert "The expansion was not used: character(s) no longer listed: " \
         "Stuart" in text
     assert out["seed"] == seed
     assert out["clarifications"][0]["answer"] == "an answer"
+    # what the model did is kept to read
+    assert (tmp_path / "out" / "interim" / "seed_round_01_rejected.md").exists()
+
+
+def test_a_retry_that_keeps_everything_is_used(tmp_path, monkeypatch):
+    _config(tmp_path)
+    seed = SEED + "\n## Characters\n- **Kirsty** - the host.\n" \
+                  "- **Stuart** - her husband.\n"
+    bad = seed.replace("- **Stuart** - her husband.\n", "") + "\nMore " * 20
+    good = seed + "\n## Subplot\n\nThe ferry sinks.\n"
+    _llm(monkeypatch, _assessment(), _assessment(questions=[]))
+    _expander(monkeypatch, bad, good)
+    _answers(monkeypatch, "a", "an answer", "", "", "k", "d", "")
+    out = seed_review.run_seed_review(seed)
+    assert "The ferry sinks." in out["seed"]
+
+
+def test_an_echoed_fence_is_taken_off_the_expansion(monkeypatch):
+    monkeypatch.setattr(seed_review, "generate_prose",
+                        lambda p, **k: "Here it is:\n<brief>\n# T\n\nBody.\n</brief>")
+    assert seed_review.expand("# T\n", []) == "# T\n\nBody.\n"
 
 
 def test_lost_material_checks():
@@ -559,3 +583,286 @@ def test_a_saved_bible_without_a_seed_falls_back_to_the_given_one():
     assert pipeline.check_resume(_args(prompt="MY SEED"), state, None) == \
         "MY SEED"
     assert pipeline.check_resume(_args(), state, None)      # bundled example
+
+
+# --------------------------------------------------------------- auto mode
+
+def _never_prompts(monkeypatch):
+    """Auto mode must work with no terminal: any prompt is a failure."""
+    monkeypatch.setattr(seed_review, "interactive", lambda: False)
+    monkeypatch.setattr(seed_review, "_input",
+                        lambda p: pytest.fail("auto mode must not prompt"))
+
+
+def test_auto_mode_is_not_downgraded_without_a_terminal(tmp_path, monkeypatch):
+    _config(tmp_path, "  seed_review: auto\n")
+    monkeypatch.setattr(seed_review, "interactive", lambda: False)
+    assert seed_review.mode() == "auto"
+
+
+def test_auto_accepts_every_suggestion_and_reviews_until_done(
+        tmp_path, monkeypatch, capsys):
+    """Round 1: two questions with defaults -> expand -> keep. Round 2: no
+    questions -> stop. The size falls back to the recommendation because the
+    requested 50,000 words still does not fit."""
+    _config(tmp_path, "  seed_review: auto\n")
+    calls = _llm(monkeypatch, _assessment(), _assessment(questions=[]))
+    expansions = _expander(monkeypatch, EXPANDED)
+    _never_prompts(monkeypatch)
+
+    out = seed_review.run_seed_review(SEED)
+
+    assert len(calls) == 2                       # reviewed, then re-reviewed
+    prompt = expansions[0]["prompt"]
+    assert "No hosts subplot." in prompt
+    assert "Alternating Stuart and Kirsty." in prompt
+    assert "(the author accepted this suggestion)" in prompt
+    assert out["seed"] == EXPANDED
+    assert out["clarifications"] == []           # built into the seed
+    assert (out["chapters"], out["words_per_chapter"]) == (10, 2000)
+    assert "using the recommendation" in capsys.readouterr().out
+    record = json.loads((tmp_path / "out" / "state" / "seed.json").read_text())
+    assert record["rounds"] == 1 and record["current"] == EXPANDED
+
+
+def test_auto_keeps_the_requested_size_when_the_seed_fits(
+        tmp_path, monkeypatch):
+    _config(tmp_path, "  seed_review: auto\n")
+    _llm(monkeypatch, _assessment(verdict="about_right", questions=[],
+                                  scenes=[]))
+    _expander(monkeypatch)                        # must not expand
+    _never_prompts(monkeypatch)
+    out = seed_review.run_seed_review(SEED)
+    assert (out["chapters"], out["words_per_chapter"]) == (25, 2000)
+
+
+def test_auto_stops_at_the_round_cap(tmp_path, monkeypatch, capsys):
+    """A reviewer that asks something every round cannot expand forever."""
+    _config(tmp_path, "  seed_review: auto\n")
+    calls = _llm(monkeypatch, _assessment())       # same questions forever
+    _expander(monkeypatch, *([EXPANDED] * seed_review.AUTO_MAX_ROUNDS))
+    _never_prompts(monkeypatch)
+    seed_review.run_seed_review(SEED)
+    assert len(calls) == seed_review.AUTO_MAX_ROUNDS + 1
+    assert f"stopping after {seed_review.AUTO_MAX_ROUNDS} expansion" \
+        in capsys.readouterr().out
+
+
+def test_auto_stops_when_a_question_has_no_suggestion(tmp_path, monkeypatch,
+                                                      capsys):
+    _config(tmp_path, "  seed_review: auto\n")
+    _llm(monkeypatch, _assessment(
+        questions=[{"question": "Who is the narrator?", "why": "voice"}]))
+    _expander(monkeypatch)                        # must not expand
+    _never_prompts(monkeypatch)
+    out = seed_review.run_seed_review(SEED)
+    assert out["seed"] == SEED
+    assert "no suggested answer" in capsys.readouterr().out
+
+
+def test_auto_accepts_a_boolean_on_key_or_the_accept_alias(tmp_path):
+    for value in ("accept", "yes", "true"):
+        _config(tmp_path, f"  seed_review: {value}\n")
+        assert seed_review.mode() == "auto", value
+
+
+# ------------------------------------------ answering: back, forms, menus
+
+QUESTIONS = [{"question": "Who narrates?", "why": "voice", "default": "Aria"},
+             {"question": "How does it end?", "why": "", "default": ""},
+             {"question": "Season?", "why": "", "default": "winter"}]
+
+
+def test_back_returns_to_the_previous_question(monkeypatch, capsys):
+    monkeypatch.setattr(seed_review, "_ask_form", None)
+    _answers(monkeypatch, "Tom", "back", "Mara", "badly", "")
+    out = seed_review.ask_questions(QUESTIONS)
+    assert [c["answer"] for c in out] == ["Mara", "badly", "winter"]
+    assert [c["answered"] for c in out] == [True, True, False]
+    text = capsys.readouterr().out
+    # the whole round is listed before the first question is asked
+    assert text.index("3. Season?") < text.index("1/3. Who narrates?")
+
+
+def test_skip_still_accepts_the_remaining_suggestions(monkeypatch):
+    monkeypatch.setattr(seed_review, "_ask_form", None)
+    _answers(monkeypatch, "skip")
+    out = seed_review.ask_questions(QUESTIONS)
+    assert [c["answer"] for c in out] == ["Aria", "winter"]
+
+
+def test_a_form_answers_the_round_at_once(monkeypatch):
+    seen = {}
+
+    def form(fields):
+        seen["fields"] = fields
+        return ["", "the ferry sinks", "", "Add a dog."]
+    monkeypatch.setattr(seed_review, "_ask_form", form)
+    monkeypatch.setattr(seed_review, "_input", lambda p: pytest.fail(
+        "a form must not fall back to one-at-a-time prompts"))
+    answers = seed_review.collect_answers(QUESTIONS)
+    assert [f["question"] for f in seen["fields"]][-1] == seed_review.NOTE_PROMPT
+    assert seen["fields"][-1]["note"] is True
+    assert answers == [
+        {"question": "Who narrates?", "answer": "Aria", "answered": False},
+        {"question": "How does it end?", "answer": "the ferry sinks",
+         "answered": True},
+        {"question": "Season?", "answer": "winter", "answered": False},
+        {"question": "The author adds", "answer": "Add a dog.",
+         "answered": True}]
+
+
+def test_an_unanswered_form_ends_the_review(monkeypatch):
+    monkeypatch.setattr(seed_review, "_ask_form", lambda fields: None)
+    monkeypatch.setitem(seed_review._INPUT, "closed", False)
+    assert seed_review.collect_answers(QUESTIONS) == []
+    assert seed_review._INPUT["closed"] is True
+
+
+def test_choose_your_own_size_is_not_stop(monkeypatch):
+    """Regression guard: 'c' must reach the custom size prompt, not fall into
+    the size options (where its None would mean 'stop')."""
+    monkeypatch.setattr(seed_review, "_ask_form", None)
+    _answers(monkeypatch, "c", "7", "1500")
+    requested = {"chapters": 10, "words_per_chapter": 2000, "source": "seed"}
+    chosen = seed_review.decide(requested, None)
+    assert chosen == {"chapters": 7, "words_per_chapter": 1500,
+                      "source": "your choice"}
+
+
+def test_menus_offer_their_choices_and_keep_shows_the_changes(monkeypatch):
+    calls = []
+
+    def ask(question, default="", details="", choices=()):
+        calls.append({"default": default, "details": details,
+                      "choices": list(choices)})
+        return default
+    monkeypatch.setattr(seed_review, "_ask", ask)
+    assert seed_review._keep_expansion("+ a new line") is True
+    assert calls[-1]["details"] == "+ a new line"
+    assert [k for k, _ in calls[-1]["choices"]] == ["k", "u"]
+    seed_review.decide({"chapters": 3, "words_per_chapter": 900,
+                        "source": "seed"},
+                       {"chapters": 5, "words_per_chapter": 900,
+                        "source": "review"})
+    assert [k for k, _ in calls[-1]["choices"]] == ["k", "r", "c", "s"]
+
+
+def test_show_changes_returns_every_changed_line(capsys):
+    before = "\n".join(f"line {i}" for i in range(3))
+    after = before + "\n" + "\n".join(f"new {i}" for i in range(60))
+    changes = seed_review.show_changes(before, after, 1)
+    assert "+new 59" in changes                     # past the printed 40
+    assert "+new 59" not in capsys.readouterr().out
+
+
+def test_the_auto_round_cap_comes_from_the_config(tmp_path, monkeypatch, capsys):
+    _config(tmp_path, "  seed_review: auto\n  seed_auto_rounds: 2\n")
+    calls = _llm(monkeypatch, _assessment())       # same questions forever
+    _expander(monkeypatch, EXPANDED, EXPANDED)
+    _never_prompts(monkeypatch)
+    seed_review.run_seed_review(SEED)
+    assert len(calls) == 3                          # 2 expansions, 3 reviews
+    assert "stopping after 2 expansion" in capsys.readouterr().out
+
+
+def test_no_auto_rounds_reviews_without_expanding(tmp_path, monkeypatch):
+    _config(tmp_path, "  seed_review: auto\n  seed_auto_rounds: 0\n")
+    calls = _llm(monkeypatch, _assessment())
+    _expander(monkeypatch)                          # must not expand
+    _never_prompts(monkeypatch)
+    out = seed_review.run_seed_review(SEED)
+    assert len(calls) == 1 and out["seed"] == SEED
+
+
+# ------------------------------------------------ the seed's chapter length
+
+RANGE_SEED = SEED.replace(
+    "**Target Length:** Friday evening through Sunday afternoon, approximately "
+    "50,000 words",
+    "* **Word Count & Depth:** 1,500–1,700 words per chapter.")
+
+
+def test_a_stated_chapter_range_is_the_requested_length(tmp_path, monkeypatch):
+    """Regression: the seed asked for 1,500-1,700 words a chapter and the run
+    was sized (and the reviewer told) 10 x 2,000 from the config."""
+    _config(tmp_path, "  seed_review: warn\n")
+    calls = _llm(monkeypatch, _assessment(
+        stated={}, verdict="about_right",
+        recommended={"chapters": 10, "words_per_chapter": 2000}))
+    out = seed_review.run_seed_review(RANGE_SEED, num_chapters=10)
+    assert out["words_per_chapter"] == 1600
+    assert "10 chapters of about 1,600 words" in calls[0]["prompt"]
+
+
+def test_the_recommendation_stays_inside_the_stated_range(tmp_path):
+    _config(tmp_path)
+    a = seed_review.parse_assessment(json.dumps(_assessment(
+        recommended={"chapters": 10, "words_per_chapter": 2000})), SEED, 5)
+    a["stated"]["words_range"] = (1500, 1700)
+    assert seed_review.recommended_size(a, 1600)["words_per_chapter"] == 1700
+
+
+def test_the_authors_range_wins_over_one_an_expansion_added():
+    assert seed_review.seed_chapter_words(
+        RANGE_SEED, RANGE_SEED + "\n2,000 words per chapter.\n") == (1500, 1700)
+    assert seed_review.chapter_words_target((1500, 1700)) == 1600
+    assert seed_review.seed_chapter_words(SEED) is None
+
+
+def test_the_chapter_length_is_read_then_taken_out_of_the_seed(tmp_path,
+                                                             monkeypatch):
+    """The size is a number from here on; left in the seed, the length rode
+    into every prompt beside it ("1,500-1,700 ... 2,000 words per chapter")."""
+    _config(tmp_path, "  seed_review: off\n")
+    out = seed_review.run_seed_review(RANGE_SEED)
+    assert out["words_per_chapter"] == 1600
+    assert "words per chapter" not in out["seed"]
+    assert "Sunday afternoon: the final sauna scene" in out["seed"]
+    plan = json.loads((tmp_path / "out" / "state" / "plan.json").read_text())
+    assert plan["words_per_chapter"] == 1600          # a resume keeps it
+
+
+def test_a_length_an_expansion_writes_in_is_stripped_not_kept(tmp_path,
+                                                              monkeypatch):
+    """Regression: an auto-accepted suggestion wrote "2,000 words per
+    chapter." into the master seed."""
+    _config(tmp_path, "  seed_review: auto\n")
+    _llm(monkeypatch, _assessment(stated={}, verdict="about_right"),
+         _assessment(stated={}, verdict="about_right", questions=[]))
+    stripped = seed_review.strip_chapter_length(RANGE_SEED)[0]
+    _expander(monkeypatch, stripped + "\n2,000 words per chapter.\n"
+              "\n## Subplot\n\nThe hosts are divorcing.\n")
+    _never_prompts(monkeypatch)
+    out = seed_review.run_seed_review(RANGE_SEED, num_chapters=10)
+    assert "The hosts are divorcing." in out["seed"]
+    assert "words per chapter" not in out["seed"]
+    assert 1500 <= out["words_per_chapter"] <= 1700   # inside the author's range
+    record = json.loads((tmp_path / "out" / "state" / "seed.json").read_text())
+    assert record["original"] == RANGE_SEED         # the author's file, as given
+    assert "words per chapter" not in record["current"]
+
+
+def test_the_architect_strips_lengths_from_the_seed_and_answers(tmp_path,
+                                                                monkeypatch):
+    _config(tmp_path)
+    seen = []
+
+    def fake(prompt, **kw):
+        seen.append(prompt)
+        return json.dumps({"title": "Snowbound", "characters": []})
+
+    monkeypatch.setattr(architect, "generate_with_wait", fake)
+    clar = [{"question": "Length?", "answer": "2,000 words per chapter.",
+             "answered": False},
+            {"question": "Hosts?", "answer": "Divorcing. About 1,800 words "
+             "per chapter.", "answered": True}]
+    bible = architect.run_architect(RANGE_SEED, clar)
+    assert "words per chapter" not in seen[0]
+    assert "words per chapter" not in bible["seed"]
+    assert [c["answer"] for c in bible["clarifications"]] == ["Divorcing."]
+
+
+def test_a_rerun_with_the_unstripped_seed_file_is_the_same_run():
+    assert pipeline._norm_seed(RANGE_SEED) == pipeline._norm_seed(
+        seed_review.strip_chapter_length(RANGE_SEED)[0])

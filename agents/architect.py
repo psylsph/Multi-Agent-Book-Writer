@@ -7,7 +7,7 @@ structured story bible that every later agent uses for consistency.
 from shared import prompts
 from shared.context import update_context
 from shared.llm_utils import (extract_json, extract_seed_characters,
-                              same_character,
+                              same_character, strip_chapter_length,
                               extract_seed_extras)
 from shared.llm_client import AbortRun, generate_with_wait
 from shared.output import format_bible_markdown, save_interim
@@ -72,6 +72,17 @@ def _normalize(bible, seed_text):
     }
 
 
+def without_chapter_length(clarifications):
+    """Clarifications with any per-chapter length taken out of the answers;
+    an answer that was only a length is dropped."""
+    out = []
+    for c in clarifications or ():
+        answer = strip_chapter_length(str(c.get("answer") or ""))[0].strip()
+        if answer:
+            out.append({**c, "answer": answer})
+    return out
+
+
 def run_architect(seed_text, clarifications=()):
     """
     Build a story bible from the seed prompt.
@@ -80,6 +91,11 @@ def run_architect(seed_text, clarifications=()):
     built straight from the seed text so the pipeline never dead-ends.
     """
     print("[ARCHITECT] Building story bible from seed prompt...")
+    # The book's size is a number in config (settled by the seed review);
+    # a chapter length left in the seed or an answer would reach every
+    # prompt through the bible and argue with it (see strip_chapter_length).
+    seed_text = strip_chapter_length(seed_text)[0]
+    clarifications = without_chapter_length(clarifications)
     answers = ""
     if clarifications:
         answers = ("\nThe author has also settled these questions about the "
@@ -106,7 +122,7 @@ If the seed lacks a section, fill it in minimally and sensibly.
 
 {answers}
 Creative seed:
-\"\"\"{seed_text}\"\"\"
+{prompts.fence(seed_text, "brief")}
 """
     bible = None
     try:

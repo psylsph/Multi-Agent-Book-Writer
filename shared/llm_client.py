@@ -42,6 +42,56 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _THINK_OPEN_RE = re.compile(r"<think>.*\Z", re.DOTALL)  # cut off mid-thought
 
 
+def strip_reasoning(content):
+    """`content` without any reasoning block a server left in it.
+
+    Three shapes are seen: a complete <think>...</think> block; an opening tag
+    with no close (the reply was cut off mid-thought); and a bare closing tag
+    with no opening one. The last happens with Qwen3-style chat templates,
+    which put <think> in the PROMPT, so the reply is "reasoning </think>
+    prose" on a server that does not split reasoning out (llama.cpp without
+    --reasoning-format, some proxies): everything up to that tag is thinking.
+    """
+    content = _THINK_RE.sub("", content)
+    content = _THINK_OPEN_RE.sub("", content)
+    close = content.find("</think>")
+    if close != -1:
+        content = content[close + len("</think>"):]
+    return content
+
+
+# Where the LLM server and SearXNG are is a fact about the machine, not the
+# book: in a container (or with SearXNG on a Docker network) they are not on
+# localhost. These win over config.yaml for the CLI and the web GUI alike.
+LLM_URL_ENV = "BOOKWRITER_LLM_BASE_URL"
+SEARXNG_URL_ENV = "BOOKWRITER_SEARXNG_URL"
+ENDPOINT_ENV = (("llm", "base_url", LLM_URL_ENV),
+                ("web_search", "searxng_url", SEARXNG_URL_ENV))
+
+
+def endpoint_overrides():
+    """[(section, key, value)] for every endpoint variable that is set."""
+    return [(section, key, os.environ[env].strip())
+            for section, key, env in ENDPOINT_ENV
+            if os.environ.get(env, "").strip()]
+
+
+def apply_endpoint_overrides(cfg, announce=False):
+    """Put the endpoint variables into a config dict; returns True if one
+    changed a value. announce prints a [CONFIG] line for each change."""
+    changed = False
+    for section, key, value in endpoint_overrides():
+        if not isinstance(cfg.get(section), dict):
+            cfg[section] = {}
+        if cfg[section].get(key) != value:
+            if announce:
+                env = next(e for s, k, e in ENDPOINT_ENV if (s, k) == (section, key))
+                print(f"[CONFIG] {section}.{key}: {value} (from {env})")
+            cfg[section][key] = value
+            changed = True
+    return changed
+
+
 def load_config(path=None):
     """Load (or reload) the configuration. Called once by main.py at startup."""
     global _config
@@ -63,6 +113,9 @@ def load_config(path=None):
     for name, agent_cfg in list(_config["agents"].items()):
         if not isinstance(agent_cfg, dict):
             _config["agents"][name] = {}
+    # a wrong-typed value would otherwise crash a stage hours into the run
+    for message in config_schema.fix_types(_config):
+        print(f"[CONFIG] {message}")
 
     # migrate legacy 'ollama:' section if present and 'llm:' is unset
     llm_cfg = _config["llm"]
@@ -71,6 +124,7 @@ def load_config(path=None):
         llm_cfg["base_url"] = legacy["api_url"]
     if "model" not in llm_cfg and legacy.get("model"):
         llm_cfg["model"] = legacy["model"]
+    apply_endpoint_overrides(_config, announce=True)
 
     # every option the user left out takes its one documented default
     for section, defaults in config_schema.DEFAULTS.items():
@@ -182,6 +236,65 @@ def _max_tokens(llm_cfg, agent_cfg, agent=None):
             or AGENT_MAX_TOKENS_DEFAULTS.get(agent) or None)
 
 
+# ------------------------------------------------ sampling controls
+
+# Sampler fields a llama.cpp / Ollama family server accepts at the top level of
+# a chat request. Measured on a fiction model, a prose battery at temp 1.0 was
+# purple and cliche-heavy; temp 0.85-0.9 + min_p 0.1 + DRY (0.8/1.75/2/1024)
+# cut the stock phrasing without touching the weights. temperature is NOT here:
+# it stays per agent (agents.<name>.temperature).
+#
+# Only the keys the user wrote are sent. OpenAI rejects unknown request fields,
+# so an empty llm.sampling block sends nothing and is the default. The names
+# live in config_schema so its typo check and this payload share one list.
+SAMPLING_KEYS = config_schema.SAMPLING_KEYS
+
+# Agents whose every reply is JSON. Repetition penalties (repeat_penalty, DRY)
+# fight JSON, which repeats its keys and structure by design, and an unreadable
+# reply here costs continuity facts or a review. So llm.sampling, which is
+# tuned for prose, is not sent to them, nor to any json_mode call; an
+# agents.<name>.sampling block still applies, for whoever wants to measure it.
+JSON_AGENTS = {"extractor", "verifier", "reviewer"}
+
+# Agents that rewrite text they are given: the editor (revisions, the polish)
+# and the seed reviewer (expanding the seed "keeping every word"). Their job is
+# to reproduce most of the input, which is in the context - exactly what
+# repetition penalties punish. Measured on a 26B model with DRY at
+# allowed_length 3: the polish fused words ("againsther"), garbled others
+# ("unremarkableRE", "darked", "lidden") that the drafts did not contain. They
+# keep llm.sampling's truncation samplers (min_p, top_k, top_p) but not these.
+COPY_AGENTS = {"editor", "seed_reviewer"}
+COPY_EXCLUDED = {"repeat_penalty", "repeat_last_n", "presence_penalty",
+                 "frequency_penalty", "dry_multiplier", "dry_base",
+                 "dry_allowed_length", "dry_penalty_last_n",
+                 "xtc_probability", "xtc_threshold"}   # XTC skips the likeliest
+                                                      # token: the right copy
+
+
+def _sampling_params(llm_cfg, agent_cfg=None, agent=None, json_mode=False):
+    """Whitelisted sampler fields for one request ({} when none apply).
+
+    agents.<name>.sampling, when present, replaces llm.sampling for that
+    agent. Otherwise llm.sampling applies, except to JSON_AGENTS and json_mode
+    calls, and without its repetition penalties for COPY_AGENTS. Unknown keys are ignored here; config_schema warns about them so a
+    typo (`min_p` vs `minp`) does not silently do nothing.
+    """
+    agent_cfg = agent_cfg or {}
+    excluded = set()
+    if "sampling" in agent_cfg:
+        sampling = agent_cfg.get("sampling") or {}
+    elif json_mode or agent in JSON_AGENTS:
+        return {}
+    else:
+        sampling = llm_cfg.get("sampling") or {}
+        if agent in COPY_AGENTS:
+            excluded = COPY_EXCLUDED
+    if not isinstance(sampling, dict):
+        return {}
+    return {key: sampling[key] for key in SAMPLING_KEYS
+            if sampling.get(key) is not None and key not in excluded}
+
+
 # ---------------------------------------------------------------- run stats
 
 PROGRESS_SECONDS = 20          # streaming progress line interval
@@ -282,18 +395,30 @@ def _check_context(messages, agent, llm_cfg, agent_cfg=None):
               "book.summary_window, or raise the server's context size.")
 
 
-def _read_stream(response, agent):
+class StreamTooLong(RuntimeError):
+    """A streamed reply ran past llm.stream_max_seconds."""
+
+
+def _read_stream(response, agent, max_seconds=None):
     """Assemble a streamed (SSE) chat completion.
 
     Returns (content, finish_reason, usage). Prints a progress line every
     PROGRESS_SECONDS. Transport errors propagate to the caller's retry
     handling; the partial text is discarded.
+
+    llm.timeout only bounds the wait for each chunk, so a model that loops
+    while trickling tokens would never time out: max_seconds (when set) caps
+    the whole reply and raises StreamTooLong.
     """
     response.encoding = "utf-8"
     parts, finish, usage, chunks = [], None, None, 0
     started = last_print = time.time()
     try:
         for raw in response.iter_lines(decode_unicode=True):
+            if max_seconds and time.time() - started > max_seconds:
+                raise StreamTooLong(
+                    f"the {agent} reply was still streaming after "
+                    f"{max_seconds:.0f}s (llm.stream_max_seconds)")
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8", "replace")
             line = (raw or "").strip()
@@ -361,6 +486,7 @@ def _request(messages, agent="writer", model=None, json_mode=False):
     max_tokens = _max_tokens(llm_cfg, agent_cfg, agent)
     if max_tokens:
         payload["max_tokens"] = int(max_tokens)
+    payload.update(_sampling_params(llm_cfg, agent_cfg, agent, json_mode))
     if (json_mode and llm_cfg.get("json_mode")
             and not _STATE["json_mode_broken"]):
         payload["response_format"] = {"type": "json_object"}
@@ -397,7 +523,8 @@ def _request(messages, agent="writer", model=None, json_mode=False):
                 response = post()
             if response.status_code == 200:
                 if stream:
-                    content, finish, usage = _read_stream(response, agent)
+                    content, finish, usage = _read_stream(
+                        response, agent, llm_cfg.get("stream_max_seconds"))
                     if not content and finish is None:
                         raise ValueError("the stream contained no content")
                 else:
@@ -419,8 +546,7 @@ def _request(messages, agent="writer", model=None, json_mode=False):
                         data.get("usage")
                 # Some servers leak the reasoning block into 'content';
                 # never let it reach the book text.
-                content = _THINK_RE.sub("", content)
-                content = _THINK_OPEN_RE.sub("", content)
+                content = strip_reasoning(content)
                 _record(agent, time.time() - started, usage, prompt_chars)
                 return content.strip(), finish
             last_error = RuntimeError(
@@ -467,6 +593,11 @@ def _request(messages, agent="writer", model=None, json_mode=False):
             last_error = RuntimeError(
                 f"llm.base_url ({base_url}) is not a usable URL: {e}")
             break  # a typo in the config won't improve on retry
+        except StreamTooLong as e:
+            # the server is up (it kept sending); the model was looping. A
+            # retry samples afresh, so it is worth one - but it is not an
+            # outage, so no endpoint wait follows.
+            last_error = RuntimeError(str(e))
         except (KeyError, IndexError, ValueError) as e:
             last_error = RuntimeError(f"Malformed response from endpoint: {e}")
         except requests.exceptions.RequestException as e:

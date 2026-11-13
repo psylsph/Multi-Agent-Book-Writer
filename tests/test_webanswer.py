@@ -21,6 +21,7 @@ def seams(monkeypatch):
     from agents import seed_review
     from shared import web_search
     monkeypatch.setattr(seed_review, "_ask", seed_review._ask)
+    monkeypatch.setattr(seed_review, "_ask_form", None)
     monkeypatch.setattr(seed_review, "interactive", lambda: False)
     monkeypatch.setitem(seed_review._INPUT, "closed", True)
     monkeypatch.setattr(web_search, "_ask", lambda question: False)
@@ -175,3 +176,66 @@ def test_main_installs_the_browser_channel_before_parsing(monkeypatch):
     with pytest.raises(SystemExit):
         main.main()
     assert calls == [True]
+
+
+def test_a_question_carries_details_choices_and_fields(tmp_path):
+    asked = webanswer.write_question(
+        tmp_path, "  > ", "k", details="+ new line",
+        choices=[("k", "keep"), ("u", "undo")],
+        fields=[{"question": "Who?", "why": "", "default": "Aria"}])
+    on_disk = question(tmp_path)
+    assert on_disk["id"] == asked["id"]
+    assert on_disk["details"] == "+ new line"
+    assert on_disk["choices"] == [["k", "keep"], ["u", "undo"]]
+    assert on_disk["fields"][0]["default"] == "Aria"
+    plain = webanswer.write_question(tmp_path, "> ")
+    assert "details" not in plain and "fields" not in plain
+
+
+@pytest.mark.parametrize("answer, expected", [
+    ('["a", "", "c"]', ["a", "", "c"]),
+    ('["a"]', ["a", "", ""]),                      # short: defaults for the rest
+    ('["a", "b", "c", "d"]', ["a", "b", "c"]),       # long: cut
+    ("just text", ["just text", "", ""]),          # an old page's plain answer
+    ('{"x": 1}', ['{\'x\': 1}', "", ""]),
+    ("[null, 2]", ["", "2", ""]),
+])
+def test_form_replies_are_always_one_string_per_field(answer, expected):
+    assert webanswer.form_replies(answer, 3) == expected
+
+
+def test_the_installed_form_goes_through_the_files(tmp_path, seams):
+    from agents import seed_review
+    webanswer.install(directory=tmp_path, timeout=5)
+    fields = [{"question": "Who?", "why": "", "default": "Aria"},
+              {"question": "Note?", "why": "", "default": "", "note": True}]
+    threading.Thread(target=answer_next,
+                     args=(tmp_path, json.dumps(["Tom", "more fog"]))).start()
+    assert seed_review._ask_form(fields) == ["Tom", "more fog"]
+
+
+def test_an_unanswered_form_is_none(tmp_path, seams):
+    from agents import seed_review
+    webanswer.install(directory=tmp_path, timeout=0.05)
+    assert seed_review._ask_form([{"question": "Who?"}]) is None
+
+
+def test_the_installed_menu_prompt_sends_its_choices(tmp_path, seams):
+    from agents import seed_review
+    webanswer.install(directory=tmp_path, timeout=5)
+    seen = {}
+
+    def browser():
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                seen.update(question(tmp_path))
+                break
+            except OSError:
+                time.sleep(0.01)
+        webanswer.write_answer(tmp_path, seen["id"], "u")
+    threading.Thread(target=browser).start()
+    assert seed_review._ask("  > ", "k", details="+ x",
+                            choices=[("k", "keep"), ("u", "undo")]) == "u"
+    assert seen["choices"] == [["k", "keep"], ["u", "undo"]]
+    assert seen["details"] == "+ x"

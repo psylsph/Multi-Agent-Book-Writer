@@ -9,6 +9,7 @@ If the configured SearXNG is not reachable and Docker is available,
 offer_docker_setup() can pull and start a local container (after asking).
 """
 
+import json
 import os
 import re
 import secrets
@@ -21,13 +22,17 @@ from urllib.parse import urlparse
 
 import requests
 
-from shared.llm_client import get_config
+from shared import config_schema
+from shared.llm_client import SEARXNG_URL_ENV, get_config
 
 CONTAINER_NAME = "book-writer-searxng"
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
 # availability for this process: None = not checked yet
 _status = None
+# when the last query was sent (time.monotonic()), for web_search.min_interval
+_last_query = [None]
+PACING = True           # off in the test suite: stubbed searches have no limit
 
 
 class SearchError(RuntimeError):
@@ -52,9 +57,54 @@ def _clean(text):
 
 # -------------------------------------------------------------------- search
 
-def search(query):
-    """Run one query; returns [{title, url, snippet}] (possibly empty)."""
+PROVIDERS = config_schema.SEARCH_PROVIDERS
+PARALLEL_KEY_ENV = "PARALLEL_API_KEY"
+_warned = set()                       # providers already reported as failing
+
+
+def providers():
+    """web_search.providers: the search backends to ask, in order. Unknown
+    names are dropped (config_schema warns about them); none -> searxng."""
+    raw = settings().get("providers") or ["searxng"]
+    if isinstance(raw, str):
+        raw = [raw]
+    chosen = [str(p).strip().lower() for p in raw]
+    return [p for p in dict.fromkeys(chosen) if p in PROVIDERS] or ["searxng"]
+
+
+def search(query, objective=None, only=None):
+    """Run one query on every configured provider (or just `only`); returns
+    [{title, url, snippet}] merged in provider order, one entry per URL.
+
+    objective: what the query is meant to find, in words (the claim being
+    checked); Parallel uses it to pick the excerpts, SearXNG ignores it.
+    Raises SearchError only when every provider failed: one backend down
+    must not cost the others' results."""
     ws = settings()
+    names = [only] if only else providers()
+    _pace(float(ws.get("min_interval") or 0))
+    results, seen, errors = [], set(), []
+    for name in names:
+        try:
+            found = _SEARCHES[name](ws, query, objective or query)
+        except SearchError as e:
+            errors.append(f"{name}: {e}")
+            if len(names) > 1 and name not in _warned:
+                _warned.add(name)
+                print(f"[SEARCH] {name} failed ({e}); using the other "
+                      "provider(s).")
+            continue
+        for item in found[:int(ws["results_per_query"])]:
+            if item["url"] not in seen:
+                seen.add(item["url"])
+                results.append(item)
+    if errors and len(errors) == len(names):
+        raise SearchError("; ".join(errors))
+    return results
+
+
+def _searxng_search(ws, query, objective):
+    """One query against SearXNG's JSON API."""
     url = str(ws["searxng_url"]).rstrip("/") + "/search"
     try:
         response = requests.get(
@@ -87,6 +137,216 @@ def search(query):
         if len(results) >= int(ws["results_per_query"]):
             break
     return results
+
+
+# ------------------------------------------------- Parallel (an MCP server)
+#
+# Parallel's search is a remote MCP server (Streamable HTTP, JSON-RPC 2.0):
+# `initialize` opens a session (Mcp-Session-Id header), then `tools/call`
+# runs its `web_search` tool with an objective and keyword queries. It works
+# without a key at a free rate limit; a key (web_search.parallel_api_key or
+# PARALLEL_API_KEY) raises it. Plain requests: no MCP SDK dependency.
+
+_PARALLEL = {"session": None, "next_id": 1}
+
+
+def _parallel_key(ws):
+    """The Parallel key: 'env:VAR', a plain value, or PARALLEL_API_KEY. Never
+    the LLM's key - that must not be sent to a search provider."""
+    raw = str(ws.get("parallel_api_key") or "").strip()
+    if raw.startswith("env:"):
+        raw = os.environ.get(raw[4:].strip(), "")
+    return raw or os.environ.get(PARALLEL_KEY_ENV, "")
+
+
+def _parallel_rpc(ws, method, params=None, notify=False):
+    """One JSON-RPC message to the Parallel MCP server; returns (response,
+    the reply's message or None)."""
+    headers = {"Content-Type": "application/json",
+               "Accept": "application/json, text/event-stream"}
+    key = _parallel_key(ws)
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    if _PARALLEL["session"]:
+        headers["Mcp-Session-Id"] = _PARALLEL["session"]
+    body = {"jsonrpc": "2.0", "method": method}
+    if params is not None:
+        body["params"] = params
+    if not notify:
+        body["id"] = _PARALLEL["next_id"]
+        _PARALLEL["next_id"] += 1
+    url = str(ws.get("parallel_url") or "https://mcp.parallel.ai/mcp")
+    try:
+        response = requests.post(url, headers=headers, json=body,
+                                 timeout=ws["timeout"])
+    except requests.exceptions.RequestException as e:
+        raise SearchError(f"could not reach Parallel at {url} ({e})") from e
+    if notify or response.status_code >= 400:
+        return response, None
+    # An SSE stream without a charset: requests would decode it as Latin-1
+    # and every degree sign and dash in an excerpt would come out mangled.
+    text = response.content.decode("utf-8", "replace")
+    for line in reversed(text.splitlines()):
+        if line.startswith("data:"):
+            text = line[5:].strip()
+            break
+    try:
+        return response, json.loads(text)
+    except ValueError as e:
+        raise SearchError("Parallel did not return JSON-RPC") from e
+
+
+def _parallel_open(ws):
+    _PARALLEL["session"] = None
+    response, reply = _parallel_rpc(ws, "initialize", {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "multi-agent-book-writer", "version": "1"}})
+    if response.status_code >= 400 or not reply or "error" in reply:
+        raise SearchError(f"Parallel refused the session "
+                          f"(HTTP {response.status_code})")
+    _PARALLEL["session"] = response.headers.get("mcp-session-id")
+    _parallel_rpc(ws, "notifications/initialized", notify=True)
+
+
+def _parallel_search(ws, query, objective):
+    """Parallel's web_search tool; a stale session is reopened once."""
+    for attempt in (1, 2):
+        if attempt == 2 or not _PARALLEL["session"]:
+            _parallel_open(ws)
+        response, reply = _parallel_rpc(ws, "tools/call", {
+            "name": "web_search",
+            "arguments": {"objective": objective, "search_queries": [query]}})
+        if response.status_code in (400, 404) and attempt == 1:
+            continue                       # the session expired: open anew
+        if response.status_code == 429:
+            raise SearchError("Parallel's rate limit was reached (HTTP 429); "
+                              "set web_search.parallel_api_key for a higher one")
+        if response.status_code >= 400:
+            raise SearchError(f"Parallel returned HTTP {response.status_code}")
+        break
+    if not reply or "error" in reply:
+        message = ((reply or {}).get("error") or {}).get("message", "no reply")
+        raise SearchError(f"Parallel search failed ({message})")
+    result = reply.get("result") or {}
+    if result.get("isError"):
+        text = " ".join(c.get("text", "") for c in result.get("content") or [])
+        raise SearchError(f"Parallel search failed ({_clean(text)[:200]})")
+    data = result.get("structuredContent")
+    if not isinstance(data, dict):
+        try:
+            data = json.loads((result.get("content") or [{}])[0].get("text", ""))
+        except (ValueError, AttributeError, IndexError):
+            data = {}
+    words = set(_words(f"{objective} {query}"))
+    out = []
+    for item in data.get("results") or []:
+        link = item.get("url") if isinstance(item, dict) else None
+        if not link or not str(link).startswith(("http://", "https://")):
+            continue
+        out.append({"title": _clean(item.get("title"))[:150], "url": str(link),
+                    "snippet": best_passages(item.get("excerpts") or [], words,
+                                             int(ws["snippet_chars"]))})
+    return out
+
+
+def best_passages(excerpts, words, limit):
+    """The excerpt passages that share the most words with the claim, in
+    page order, up to `limit` characters. Parallel's excerpts run to
+    thousands of characters across a page; cutting them at the start kept
+    the page's opening ("The remainder of the county is rural...") and lost
+    the sentence that answers the claim."""
+    passages = []
+    for excerpt in excerpts:
+        for part in re.split(r"\n\s*\.\.\.\s*\n", str(excerpt)):
+            part = _clean(part)
+            if part:
+                passages.append(part)
+    if not passages:
+        return ""
+    score = [len(set(words) & set(_words(part))) for part in passages]
+    # passages that share no word with the claim are filler: never let them
+    # push the one that answers it past the limit (the page's opening is
+    # used only when nothing matches at all)
+    ranked = sorted((i for i in range(len(passages)) if score[i]),
+                    key=lambda i: (-score[i], i)) or [0]
+    chosen, used = [], 0
+    for i in ranked:
+        if chosen and used + len(passages[i]) > limit:
+            break
+        chosen.append(i)
+        used += len(passages[i]) + 5
+    return " ... ".join(passages[i] for i in sorted(chosen))[:limit]
+
+
+# ------------------------------------------------------- TinyFish (REST)
+#
+# TinyFish Search: GET <tinyfish_url>?query=...&purpose=... with an X-API-Key
+# header; it answers {"results": [{title, url, snippet, ...}]}. A key is
+# required (web_search.tinyfish_api_key or TINYFISH_API_KEY).
+
+TINYFISH_KEY_ENV = "TINYFISH_API_KEY"
+
+
+def _tinyfish_key(ws):
+    """'env:VAR', a plain value, or TINYFISH_API_KEY - never the LLM key."""
+    raw = str(ws.get("tinyfish_api_key") or "").strip()
+    if raw.startswith("env:"):
+        raw = os.environ.get(raw[4:].strip(), "")
+    return raw or os.environ.get(TINYFISH_KEY_ENV, "")
+
+
+def _tinyfish_search(ws, query, objective):
+    key = _tinyfish_key(ws)
+    if not key:
+        raise SearchError(f"TinyFish needs an API key: set {TINYFISH_KEY_ENV} "
+                          "or web_search.tinyfish_api_key")
+    url = str(ws.get("tinyfish_url") or "https://api.search.tinyfish.ai/")
+    params = {"query": query}
+    if objective and objective != query:
+        params["purpose"] = objective            # what the query should find
+    try:
+        response = requests.get(url, timeout=ws["timeout"], params=params,
+                                headers={"X-API-Key": key})
+    except requests.exceptions.RequestException as e:
+        raise SearchError(f"could not reach TinyFish at {url} ({e})") from e
+    if response.status_code in (401, 403):
+        raise SearchError(f"TinyFish refused the key (HTTP {response.status_code})")
+    if response.status_code == 429:
+        raise SearchError("TinyFish's rate limit was reached (HTTP 429)")
+    if response.status_code != 200:
+        raise SearchError(f"TinyFish returned HTTP {response.status_code}")
+    try:
+        data = response.json()
+    except ValueError as e:
+        raise SearchError("TinyFish did not return JSON") from e
+    out = []
+    for item in data.get("results") or [] if isinstance(data, dict) else []:
+        link = item.get("url") if isinstance(item, dict) else None
+        if not link or not str(link).startswith(("http://", "https://")):
+            continue
+        out.append({"title": _clean(item.get("title"))[:150], "url": str(link),
+                    "snippet": _clean(item.get("snippet"))[:int(ws["snippet_chars"])]})
+    return out
+
+
+_SEARCHES = {"searxng": _searxng_search, "parallel": _parallel_search,
+             "tinyfish": _tinyfish_search}
+
+
+def _pace(interval):
+    """Wait until `interval` seconds have passed since the previous query.
+    A chapter's queries went out back to back: Brave's Search API answered
+    the second with 429 Too Many Requests and SearXNG suspended the engine
+    for three minutes, so most queries never reached it."""
+    if not PACING:
+        return
+    now = time.monotonic()
+    if interval > 0 and _last_query[0] is not None:
+        wait = _last_query[0] + interval - now
+        if wait > 0:
+            time.sleep(wait)
+            now += wait
+    _last_query[0] = now
 
 
 def banned_terms():
@@ -344,10 +604,10 @@ def audit_markdown(chapter_number, claims, verdicts):
 
 # -------------------------------------------------------------- availability
 
-def check():
-    """(ok, message): can we run a search against the configured SearXNG?"""
+def check(only=None):
+    """(ok, message): can we run a search (on `only`, or any provider)?"""
     try:
-        search("test")
+        search("test", only=only)
         return True, ""
     except SearchError as e:
         return False, str(e)
@@ -441,7 +701,7 @@ def _wait_until_ready(seconds=90, attempts=3):
             return False
         time.sleep(3)
     for attempt in range(attempts):
-        ok, message = check()
+        ok, message = check(only="searxng")
         if ok:
             return True
         if attempt + 1 < attempts:
@@ -472,6 +732,31 @@ def _auto_start_mode(value):
 
 
 def offer_docker_setup():
+    """Make web search available: SearXNG first when it is a provider
+    (offering to start it in Docker), then any other provider. Returns True
+    when a search works. Never raises."""
+    global _status
+    names = providers()
+    if "searxng" in names and _offer_searxng():
+        return True
+    for name in names:
+        if name == "searxng":
+            continue
+        ok, message = check(only=name)
+        if ok:
+            print(f"[SEARCH] Searching with {name}.")
+            _status = True
+            return True
+        print(f"[SEARCH] {name} is not available: {message}")
+    print("[SEARCH] No search provider works; the run continues without web "
+          "search." + (" SearXNG elsewhere (a Docker network, another host)? "
+                       f"Set web_search.searxng_url or {SEARXNG_URL_ENV}."
+                       if "searxng" in names else ""))
+    _status = False
+    return False
+
+
+def _offer_searxng():
     """Make SearXNG available, offering to start it in Docker if needed.
 
     Honors web_search.auto_start: "ask" (default; prompts on a terminal),
@@ -480,7 +765,7 @@ def offer_docker_setup():
     """
     global _status
     ws = settings()
-    ok, message = check()
+    ok, message = check(only="searxng")
     if ok:
         _status = True
         return True
@@ -523,8 +808,7 @@ def offer_docker_setup():
             if mode != "yes" and not _ask(
                     f"Download the '{image}' Docker image and start SearXNG "
                     f"on 127.0.0.1:{port}?"):
-                print("[SEARCH] Skipping; the run continues without web "
-                      "search.")
+                print("[SEARCH] Not starting SearXNG.")
                 _status = False
                 return False
             settings_dir = config_dir()
@@ -541,5 +825,5 @@ def offer_docker_setup():
         print(f"[SEARCH] Could not start SearXNG: {e}")
         _status = False
     print("[SEARCH] SearXNG is ready." if _status else
-          "[SEARCH] SearXNG did not come up; continuing without web search.")
+          "[SEARCH] SearXNG did not come up.")
     return _status

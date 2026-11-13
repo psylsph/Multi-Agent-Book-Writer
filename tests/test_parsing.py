@@ -330,3 +330,100 @@ def test_reset_context_mutates_in_place():
     assert ctx.context["title"] == ""
     assert get_context("title") == ""
     assert get_context()["chapters"] == []
+
+
+# A seed that marks its sections with bold lines instead of headings, after a
+# real "## Constraints" heading (the shape of a seed that broke both parsers).
+BOLD_SEED = """# The Close
+**The Setting:**
+A cul-de-sac.
+## Constraints
+- **POV** - Single POV
+* **Duration** - A few weeks
+**Plot Roadmap:**
+**Chapter 1: The Rant**
+* **Couples:** Ann & Bo.
+* **Plot:** Boredom sets in.
+**Chapter 2: The Swap**
+* **Plot:** A dull dinner.
+**Themes:**
+* Masks.
+"""
+
+
+def test_a_bold_line_ends_the_constraints():
+    """Regression: the section ran on to the end of the seed, so every
+    roadmap bullet became a 'constraint' - in the bible, and in the check that
+    then rejected every seed expansion for 'rewording' them."""
+    from shared.llm_utils import extract_seed_extras
+    constraints, _ = extract_seed_extras(BOLD_SEED)
+    assert constraints == ["**POV** - Single POV", "**Duration** - A few weeks"]
+
+
+def test_a_star_bullet_keeps_its_bold_text():
+    from shared.llm_utils import extract_seed_extras
+    constraints, _ = extract_seed_extras(
+        "## Constraints\n* **Tense** - past\n*plain star bullet\n")
+    assert constraints == ["**Tense** - past", "plain star bullet"]
+
+
+def test_chapters_without_an_outline_heading_keep_their_notes():
+    """Regression: 'Chapter N' lines found without an Outline heading lost the
+    lines under them, so every chapter's summary was empty - and the seed's
+    outline overrides the planner's, so the writer got none."""
+    from agents.planner import extract_seed_outline
+    chapters = extract_seed_outline(BOLD_SEED)
+    assert [c["title"] for c in chapters] == ["The Rant", "The Swap"]
+    assert chapters[0]["summary"] == "Couples: Ann & Bo. Plot: Boredom sets in."
+    assert chapters[1]["summary"] == "Plot: A dull dinner."   # Themes not taken
+
+
+def test_chapters_in_different_sections_are_not_merged():
+    from agents.planner import extract_seed_outline
+    seed = ("## Intro\nChapter 1: Start - she lands.\nIntro prose.\n"
+            "## Notes\nChapter 2: End - she leaves.\nOther prose.\n")
+    chapters = extract_seed_outline(seed)
+    assert [c["summary"] for c in chapters] == ["she lands.", "she leaves."]
+
+
+def test_stated_chapter_words_reads_ranges_and_single_numbers():
+    """Regression: "1,500–1,700 words per chapter" fitted no field of the
+    seed reviewer's JSON, so the configured 2,000 replaced it."""
+    from shared.llm_utils import stated_chapter_words
+    assert stated_chapter_words(
+        "* **Word Count & Depth:** 1,500–1,700 words per chapter.") == \
+        [(1500, 1700)]
+    assert stated_chapter_words("about 2000 words a chapter") == [(2000, 2000)]
+    assert stated_chapter_words("Chapters of around 1.8k words") == \
+        [(1800, 1800)]
+    assert stated_chapter_words("3,000 to 2,500 words each chapter") == \
+        [(2500, 3000)]
+    assert stated_chapter_words(
+        "1,500-1,700 words per chapter. 2,000 words per chapter.") == \
+        [(1500, 1700), (2000, 2000)]
+    assert stated_chapter_words("a 50,000 word novel in 12 chapters") == []
+    assert stated_chapter_words("5 words per chapter") == []
+
+
+def test_strip_chapter_length_takes_out_only_the_length():
+    from shared.llm_utils import strip_chapter_length as strip
+    line = ("* **Word Count & Depth:** 1,500–1,700 words per chapter. 2,000 "
+            "words per chapter. No summaries. Meticulous sensory detail.\n")
+    text, removed = strip(line)
+    assert text == ("* **Word Count & Depth:** No summaries. Meticulous "
+                    "sensory detail.\n")
+    assert removed == ["1,500–1,700 words per chapter.",
+                       "2,000 words per chapter."]
+    # an outline entry's bracketed length; other brackets stay
+    assert strip("- Chapter 1: The Rant - the club (about 2,000 words).")[0] \
+        == "- Chapter 1: The Rant - the club."
+    assert strip("- Chapter 2: The Swap (Stuart POV, heat 3).")[1] == []
+    # a line that was only the length goes; its neighbours stay
+    assert strip("Intro.\n* **Length:** 2,000 words per chapter.\nEnd.\n")[0] \
+        == "Intro.\nEnd.\n"
+    assert strip("Write in third person. Chapters of about 1,800 words. "
+                 "Keep it tense.")[0] == "Write in third person. Keep it tense."
+    for keep in ("**Target Length:** approximately 50,000 words",
+                 "Kirsty was the first to arrive; she wrote 300 words of notes.",
+                 "Chapter 3 is set in 1750."):
+        assert strip(keep) == (keep, [])

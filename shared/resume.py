@@ -16,6 +16,7 @@ versions, which kept their state in interim/, are still read.
 import json
 from pathlib import Path
 
+from shared.context import context
 from shared.llm_client import AbortRun, get_config
 from shared.output import atomic_write_text, strip_heading
 
@@ -33,6 +34,12 @@ STATE_KEYS = {
     "chronology": True,    # structured story state per chapter
     "final": True,         # edited chapter bodies
     "unreviewed": False,   # [chapter numbers] finished without a review
+    "unrefreshed": False,  # [chapter numbers] edited, story state not yet
+                           # re-extracted from the edited text
+    "chapter_notes": True, # {drafted_at, edited_at, note}: when each chapter
+                           # was finished and what the editor had to give up
+                           # on (the web GUI's progress view; nothing reads it
+                           # back to make a decision)
 }
 
 
@@ -62,6 +69,15 @@ def save_state(key, value):
     except (OSError, TypeError, ValueError) as e:
         raise StateWriteError(f"could not save the run's {key} to {path} "
                               f"({e})") from e
+
+
+def note_chapter(number, **fields):
+    """Record when chapter `number` reached a step (drafted_at, edited_at)
+    and the editor's one-line note, in context and state/. Never raises
+    except StateWriteError, like every state write."""
+    notes = context.setdefault("chapter_notes", {})
+    notes[number] = {**notes.get(number, {}), **fields}
+    save_state("chapter_notes", notes)
 
 
 def _legacy():
@@ -105,7 +121,7 @@ def _int_keys(value):
 def _empty():
     return {"seed": None, "bible": None, "chapters": None, "summaries": None,
             "chronology": None, "research": {}, "drafts": {}, "final": {},
-            "unreviewed": set()}
+            "unreviewed": set(), "unrefreshed": set(), "chapter_notes": {}}
 
 
 def load_state():
@@ -116,7 +132,8 @@ def load_state():
                                                 pending, rounds} or None)
       bible, chapters, summaries, chronology  (None if absent)
       research, drafts, final                   ({chapter_number: text})
-      unreviewed                                (set of chapter numbers)
+      unreviewed, unrefreshed                   (sets of chapter numbers)
+      chapter_notes                             ({chapter_number: {...}})
     Missing keys are None or empty - callers decide whether to skip that
     step or rebuild it from scratch.
     """
@@ -140,7 +157,7 @@ def load_state():
             if value is None:
                 continue
         target = "chapters" if key == "outline" else key
-        if key == "unreviewed":
+        if key in ("unreviewed", "unrefreshed"):
             value = {n for n in value or () if isinstance(n, int)}
         out[target] = value
     return out

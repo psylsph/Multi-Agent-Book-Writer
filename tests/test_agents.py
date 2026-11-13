@@ -10,6 +10,7 @@ from agents import editor, writer
 from shared.context import context, reset_context, update_context
 from shared.llm_client import load_config
 from shared.story_state import minimal_state
+from shared.prompts import unfence
 
 CHAPTERS = [{"number": n, "title": f"Ch{n}", "summary": f"s{n}", "part": ""}
             for n in (1, 2, 3)]
@@ -161,8 +162,7 @@ def _run_editor(monkeypatch, revise_reply, polish_reply=None):
 
 def _body_of(prompt):
     """Echo the chapter back from the polish prompt (a no-op polish)."""
-    start = prompt.index("## Chapter")
-    return prompt[start:prompt.index("\n\nReturn ONLY")]
+    return unfence(prompt, "chapter")
 
 
 def test_editor_fixes_a_lint_finding(tmp_path, monkeypatch):
@@ -184,12 +184,58 @@ def test_editor_rejects_a_revision_that_adds_findings(tmp_path, monkeypatch):
 
 def test_editor_rejects_a_revision_that_shrinks_the_chapter(tmp_path,
                                                             monkeypatch):
-    _config(tmp_path)
+    _config(tmp_path, "  word_count_tolerance: 1.2\n")      # min 120 words
     draft = _words(150) + " foo"
     _editor_context(draft)
-    shrunk = _words(105)                          # fixes foo, loses a third
+    shrunk = _words(105)          # fixes foo, loses a third, under the minimum
     final = _run_editor(monkeypatch, shrunk)
     assert final.endswith(draft)
+
+
+def test_editor_lets_a_long_chapter_be_tightened_to_its_length(tmp_path,
+                                                              monkeypatch):
+    # 3,189 -> 2,200 words keeps 69% of a chapter: under MIN_REVISION_RATIO,
+    # but still over the minimum, so it is tightening, not truncation
+    _config(tmp_path)                             # target 100, min 80, max 150
+    _editor_context(_words(200))
+    tightened = _words(110, prefix="beta")
+    final = _run_editor(monkeypatch, tightened)
+    assert final.endswith(tightened)
+
+
+def test_editor_tightens_a_long_chapter_once(tmp_path, monkeypatch):
+    _config(tmp_path)
+    _editor_context(_words(400))
+    calls = []
+
+    def revise(prompt, **kwargs):
+        if "You are revising" not in prompt:
+            return _body_of(prompt)                # a no-op polish
+        calls.append(prompt)
+        return _words(380, prefix="gamma")       # tighter, still too long
+    monkeypatch.setattr(editor, "generate_prose", revise)
+    editor.run_editor()
+    assert len(calls) == 1
+    assert "TIGHTEN" in calls[0] and "aim for about 100" in calls[0]
+
+
+def test_editor_leaves_long_chapters_alone_when_max_length_ratio_is_0(
+        tmp_path, monkeypatch):
+    _config(tmp_path, "  max_length_ratio: 0\n")
+    draft = _words(400)
+    _editor_context(draft)
+    final = _run_editor(monkeypatch, "never asked")
+    assert final.endswith(draft)
+
+
+def test_editor_rejects_a_tightening_that_drops_a_character(tmp_path,
+                                                             monkeypatch):
+    _config(tmp_path)
+    draft = _words(150) + " Mara left. " + _words(100)
+    _editor_context(draft)
+    context["bible"]["characters"] = [{"name": "Mara Vance"}]
+    final = _run_editor(monkeypatch, _words(110, prefix="beta"))
+    assert "Mara" in final
 
 
 def test_editor_rejects_a_polish_that_truncates(tmp_path, monkeypatch):
@@ -256,3 +302,197 @@ def test_incomplete_chapters_reports_unfinished_work():
            "drafts": {1: "a", 2: "b"}}
     assert pipeline._incomplete_chapters(ctx, editor_on=True) == [2, 3]
     assert pipeline._incomplete_chapters(ctx, editor_on=False) == [3]
+
+
+def test_editor_rejects_a_polish_that_introduces_a_name(tmp_path, monkeypatch):
+    """The polish is not reviewed; a renamed character must be caught in code."""
+    _config(tmp_path)
+    draft = _words(150)
+    _editor_context(draft)
+    polished = _words(148, prefix="beta") + " and then met Darius"
+    final = _run_editor(monkeypatch, "unused",
+                        polish_reply="## Chapter 1: Ch1\n\n" + polished)
+    assert final.endswith(draft)
+
+
+def test_editor_stops_after_a_revision_that_fixes_nothing(tmp_path,
+                                                          monkeypatch):
+    """Regression: a revision with the same severity was accepted and the loop
+    spent every remaining round on the same findings."""
+    _config(tmp_path, "  revision_rounds: 4\n")
+    _editor_context(_words(120) + " foo")
+    calls = []
+
+    def prose(prompt, **kwargs):
+        if "You are revising" in prompt:
+            calls.append(1)
+            return _words(120, prefix="gamma") + " foo"    # still has foo
+        return _body_of(prompt)
+
+    monkeypatch.setattr(editor, "generate_prose", prose)
+    editor.run_editor()
+    assert len(calls) == 1
+
+
+def test_save_book_titles_an_untitled_book(tmp_path):
+    _config(tmp_path)
+    update_context("chapters", [CHAPTERS[0]])
+    update_context("title", "")
+    book = editor.save_book({1: "Body."})
+    assert book.startswith("# Untitled\n")
+
+
+def test_short_note_names_what_the_editor_gave_up_on():
+    from agents.editor import short_note
+    notes = ["lint on the draft: 2 finding(s)\n  - quota",
+             "reviewer: unreviewed - the reply could not be read",
+             "round 1: revision accepted (findings 2 -> 1)",
+             "round 2: revision rejected (severity 3 -> 5)",
+             "polish rejected (introduced new names: Zed)"]
+    note = short_note(notes, [{"check": "quota"}], [{"type": "timeline"}])
+    assert note == ("revision rejected (severity 3 -> 5); polish rejected "
+                    "(introduced new names: Zed); 2 finding(s) left: quota, "
+                    "timeline")
+    assert short_note(["round 1: revision accepted", "polish accepted"],
+                      [], []) == ""
+    assert short_note([], [], [], unreviewed=True) == "no readable review"
+
+
+def test_finished_chapters_are_timed_and_noted(tmp_path, monkeypatch):
+    """The web GUI's estimate and per-chapter notes come from state/."""
+    from shared.resume import load_state
+    _config(tmp_path)
+    _editor_context(_words(150))
+    _run_editor(monkeypatch, "unused",
+                polish_reply=_words(148, prefix="beta") + " and then met Darius")
+    notes = load_state()["chapter_notes"]
+    assert notes[1]["edited_at"] > 0
+    assert "introduced new names: Darius" in notes[1]["note"]
+
+
+def test_a_fused_word_in_the_polish_is_repaired_not_kept(tmp_path, monkeypatch):
+    """Regression: DRY made the polish fuse words it was copying."""
+    _config(tmp_path)
+    draft = _words(150) + " she leaned against her chair"
+    _editor_context(draft)
+    final = _run_editor(monkeypatch, "unused",
+                        polish_reply=_words(150) + " she leaned againsther chair")
+    assert final.endswith("she leaned against her chair")
+    assert "againsther" not in final
+
+
+def test_a_polish_with_garbled_words_is_rejected(tmp_path, monkeypatch):
+    _config(tmp_path)
+    draft = _words(150) + " an unremarkable week"
+    _editor_context(draft)
+    final = _run_editor(monkeypatch, "unused",
+                        polish_reply=_words(150) + " an unremarkableRE week")
+    assert final.endswith(draft)
+
+
+# ------------------------------------------- length and point of view (editor)
+
+THIRD = "He walked to the door and she followed him into the rain. " * 20
+FIRST = "I walked to the door and my hands shook in the rain again. " * 20
+
+
+def test_a_shorter_revision_that_fixes_a_finding_is_kept(tmp_path,
+                                                         monkeypatch):
+    """Quality over quantity: a revision that fixes a real finding is not
+    rejected for dropping under the length minimum (it was: severity 1 -> 3)."""
+    _config(tmp_path, "  word_count_tolerance: 1.2\n")      # min 120 words
+    _editor_context(_words(130) + " foo")
+    final = _run_editor(monkeypatch, _words(105))   # under the min; ratio 0.8
+    assert "foo" not in final
+    assert final.endswith(_words(105))
+
+
+def test_a_shorter_revision_that_fixes_nothing_is_rejected(tmp_path,
+                                                           monkeypatch):
+    _config(tmp_path)
+    draft = _words(120) + " foo"
+    _editor_context(draft)
+    final = _run_editor(monkeypatch, _words(100, prefix="gamma") + " foo")
+    assert final.endswith(draft)
+
+
+def test_editor_flags_a_chapter_that_leaves_the_books_person(tmp_path,
+                                                             monkeypatch):
+    """Regression: chapters 1-8 in third person, 9 and 10 slipped into "I";
+    with no book.style.pov nothing noticed. Third person is the default."""
+    _config(tmp_path)
+    update_context("chapters", CHAPTERS)
+    update_context("bible", {"title": "T", "characters": []})
+    update_context("title", "T")
+    update_context("drafts", {1: THIRD, 2: THIRD, 3: THIRD + "\n\n" + FIRST})
+    update_context("final", {1: THIRD, 2: THIRD})
+    prompts_seen = []
+
+    def prose(prompt, **kwargs):
+        if "You are revising" in prompt:
+            prompts_seen.append(prompt)
+            return THIRD + "\n\n" + THIRD
+        return _body_of(prompt)
+
+    monkeypatch.setattr(editor, "generate_prose", prose)
+    editor.run_editor()
+    assert prompts_seen and "pov" in prompts_seen[0]
+    assert "the default" in prompts_seen[0]
+    assert "I walked" not in context["final"][3]
+
+
+def test_the_writer_is_told_to_narrate_in_the_third_person(tmp_path,
+                                                          stub_writer):
+    _config(tmp_path)
+    _writer_context()
+    writer.run_writer()
+    assert all("Narrate in the third person" in p for p in stub_writer)
+
+
+SCENE_CHARACTERS = [{"name": "Stuart"}, {"name": "Kirsty"},
+                    {"name": "James"}, {"name": "Chloe"}]
+
+
+def test_the_writer_is_told_the_chapters_cast_and_county(tmp_path, stub_writer):
+    _config(tmp_path)
+    update_context("chapters", [{"number": 1, "title": "Ch1", "part": "",
+                                 "summary": "Couples: Stuart & Kirsty. Plot: x"}])
+    update_context("bible", {"title": "T", "characters": SCENE_CHARACTERS,
+                             "setting": "A cul-de-sac in rural Hampshire."})
+    update_context("title", "T")
+    writer.run_writer()
+    assert "In this chapter's scenes: Stuart, Kirsty." in stub_writer[0]
+    assert "set in Hampshire" in stub_writer[0]
+
+
+def test_editor_sends_back_a_chapter_with_someone_the_outline_left_out(
+        tmp_path, monkeypatch):
+    """Regression: James and Chloe at a dinner the outline gave to Angela &
+    Pete; the reviewer passed it."""
+    _config(tmp_path)
+    intruded = (_words(100) + " James nodded. James laughed. James stood. "
+                "Stuart sat. Kirsty smiled.")
+    update_context("chapters", [{"number": 1, "title": "Ch1", "part": "",
+                                 "summary": "Couples: Stuart & Kirsty. Plot: x"}])
+    update_context("bible", {"title": "T", "characters": SCENE_CHARACTERS})
+    update_context("title", "T")
+    update_context("drafts", {1: intruded})
+    update_context("chronology", {})
+    seen = []
+
+    def prose(prompt, **kwargs):
+        if "You are revising" in prompt:
+            seen.append(prompt)
+            return _words(100) + " Stuart sat. Kirsty smiled. They spoke of James."
+        return _body_of(prompt)
+
+    monkeypatch.setattr(editor, "generate_prose", prose)
+    editor.run_editor()
+    assert seen and "[lint] James is in this scene" in seen[0]
+    assert "James nodded" not in context["final"][1]
+
+
+def test_shrink_floor_allows_tightening_only_down_to_the_length():
+    assert editor.shrink_floor(3189, 0.75, 1280) == 1280   # 2,200 is allowed
+    assert editor.shrink_floor(1806, 0.85, 1600) == 0.85 * 1806   # 438 is not
+    assert editor.shrink_floor(1000, 0.75, 0) == 750

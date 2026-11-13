@@ -7,6 +7,7 @@ from agents import editor, writer
 from shared.context import context, reset_context, update_context
 from shared.llm_client import load_config
 from shared.story_state import minimal_state
+from shared.prompts import unfence
 
 BIBLE = {"title": "T", "genre": "g", "tone": "t", "premise": "p", "world": "w",
          "constraints": [], "characters": [{"name": "Aria", "role": "",
@@ -105,6 +106,47 @@ def test_already_edited_chapters_are_not_edited_or_refreshed_again(
     assert ("edit", 2) in events
 
 
+def test_a_crash_between_edit_and_refresh_is_refreshed_on_resume(
+        tmp_path, monkeypatch):
+    """Regression: the editor saved chapter 1's final text, then the run died
+    before refresh_state. Resume saw `1 in final`, skipped it, and later
+    chapters were written against the draft's facts forever."""
+    from shared.resume import load_state
+    _config(tmp_path)
+    events = _stub_loop(monkeypatch)
+
+    def die(n):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(pipeline, "refresh_state", die)
+    try:
+        pipeline.run_interleaved()
+    except KeyboardInterrupt:
+        pass
+    assert load_state()["unrefreshed"] == {1}       # the mark is on disk
+
+    # the rerun: final has chapter 1, the mark says its state is stale
+    reset_context()
+    update_context("bible", BIBLE)
+    update_context("chapters", CHAPTERS)
+    pipeline._hydrate_resume(load_state())
+    update_context("final", {1: "edited"})
+    events.clear()
+    monkeypatch.setattr(pipeline, "refresh_state",
+                        lambda n: events.append(("refresh", n)) or True)
+    pipeline.run_interleaved()
+    assert ("edit", 1) not in events and ("refresh", 1) in events
+    assert load_state()["unrefreshed"] == set()
+
+
+def test_a_failed_refresh_keeps_the_chapter_marked(tmp_path, monkeypatch):
+    from shared.resume import load_state
+    _config(tmp_path)
+    _stub_loop(monkeypatch)
+    monkeypatch.setattr(pipeline, "refresh_state", lambda n: n != 2)
+    pipeline.run_interleaved()
+    assert load_state()["unrefreshed"] == {2}
+
+
 # ----------------------------------------------- per-chapter modes (real code)
 
 def test_writer_only_writes_the_requested_chapter(tmp_path, monkeypatch):
@@ -122,8 +164,7 @@ def test_editor_only_edits_the_requested_chapter(tmp_path, monkeypatch):
     update_context("chronology", {})
 
     def prose(prompt, **kwargs):
-        start = prompt.index("## Chapter")
-        return prompt[start:prompt.index("\n\nReturn ONLY")]
+        return unfence(prompt, "chapter")
 
     monkeypatch.setattr(editor, "generate_prose", prose)
     editor.run_editor(only=2)
@@ -178,8 +219,9 @@ def test_next_chapter_is_written_from_the_edited_chapter(tmp_path, monkeypatch):
         return _words(120)
 
     def edit(prompt, **kwargs):
-        start = prompt.index("## Chapter")
-        text = prompt[start:prompt.index("\n\nReturn ONLY")]
+        text = unfence(prompt, "chapter")
+        if not prompt.startswith("Copy-edit"):
+            return text                    # a revision round: no change
         return text + " EDITEDMARK"        # what the polish pass "did"
 
     def extract(prompt, **kwargs):

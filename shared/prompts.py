@@ -137,11 +137,29 @@ REVISER = (
 
 POLISHER = (
     "You are a professional fiction copy editor. You fix grammar, spelling, "
-    "punctuation and awkward phrasing, and improve flow while preserving the "
-    "author's voice and ALL story content. You never summarise, shorten or "
+    "punctuation and clumsy phrasing, changing as little as that takes: the "
+    "author's voice and ALL story content stay. You never summarise, shorten or "
     "rewrite the plot, and never change a name, fact or event. You return "
     "the complete chapter, nothing else."
 )
+
+
+def fence(text, tag="text"):
+    """Wrap material (a chapter, a seed) in <tag>...</tag> so the model sees
+    exactly where it starts and ends. Triple quotes broke as soon as the
+    prose itself held a \"\"\" (a quoted document, a code sample); a closing
+    tag the text happens to contain is escaped so the block stays whole."""
+    body = str(text).replace(f"</{tag}>", f"<\\/{tag}>")
+    return f"<{tag}>\n{body}\n</{tag}>"
+
+
+def unfence(prompt, tag="text"):
+    """The material fence() wrapped in `prompt` (for tests and eval tools
+    that echo it back), or None."""
+    start, end = prompt.find(f"<{tag}>\n"), prompt.rfind(f"\n</{tag}>")
+    if start < 0 or end < start:
+        return None
+    return prompt[start + len(tag) + 3:end].replace(f"<\\/{tag}>", f"</{tag}>")
 
 
 def with_bible(role, bible):

@@ -115,6 +115,18 @@
     background: #3a2a2e; color: #ffd6dd; font-size: 13px;
   }
   #model-note { display: block; margin-top: 5px; }
+  #settings { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px;
+    padding: 0 12px; }
+  #settings summary { cursor: pointer; padding: 12px 0; font-size: 13px;
+    color: var(--muted); min-height: 20px; }
+  #settings[open] summary { margin-bottom: 4px; }
+  #settings-grid { display: grid; gap: 4px 12px;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 190px), 1fr)); }
+  #settings-grid label { margin-bottom: 10px; }
+  #settings-grid label.changed { color: var(--accent); }
+  #settings-grid .help { display: block; margin-top: 4px; }
+  #settings .settings-foot { display: flex; gap: 10px; align-items: center;
+    flex-wrap: wrap; padding-bottom: 12px; }
   .status-line {
     display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
     margin: 20px 0 10px;
@@ -122,6 +134,11 @@
   .status-line h2 { margin: 0; font-size: 16px; text-transform: none;
     letter-spacing: 0; color: var(--text); overflow-wrap: anywhere; min-width: 0; }
   #run-meta { min-width: 0; overflow-wrap: anywhere; }
+  .notice {
+    margin: 0 0 12px; padding: 10px 12px; border-radius: 8px;
+    background: #3a3326; color: #f0d8a8; border: 1px solid #4a4030;
+    font-size: 13px; line-height: 1.45; overflow-wrap: anywhere;
+  }
   .chapters { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
   .chapter {
     display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; gap: 10px;
@@ -162,6 +179,16 @@
     font-size: 12px; white-space: pre-wrap; color: var(--muted);
   }
   #q-prompt { font-weight: 600; overflow-wrap: anywhere; }
+  dialog textarea { min-height: 64px; font-family: inherit; font-size: 14px; }
+  .q-field { margin: 14px 0; }
+  .q-field .q { font-weight: 600; color: var(--text); font-size: 14px;
+    overflow-wrap: anywhere; }
+  .q-field .why { display: block; margin-top: 2px; }
+  .choices { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+  .choices button { text-align: left; font-weight: 500; }
+  .choices button.default { outline: 1px solid var(--accent); }
+  .chapter .note { grid-column: 2 / -1; font-size: 11px; color: var(--warn);
+    overflow-wrap: anywhere; margin-top: -6px; }
 
   /* iPhone / narrow screens: one column, thumb-sized controls, no zoom on focus */
   @media (max-width: 780px) {
@@ -211,6 +238,7 @@
     }
     dialog .inner { padding: 16px var(--pad-x) calc(16px + var(--safe-bottom)); }
     dialog pre { max-height: 22vh; }
+    dialog textarea { font-size: 16px; }
     .actions button { min-height: 48px; }
   }
 </style>
@@ -228,9 +256,9 @@
     <ul id="run-list"></ul>
   </aside>
   <section>
-    <form id="new-run">
+    <form id="new-run" autocomplete="off">
       <label>Seed prompt
-        <textarea id="seed" placeholder="Premise, characters, world, optional outline..."></textarea>
+        <textarea id="seed" autocomplete="off" spellcheck="true" placeholder="Premise, characters, world, optional outline..."></textarea>
       </label>
       <div class="row">
         <label>Chapters
@@ -245,6 +273,7 @@
             <option value="">from config</option>
             <option value="ask">ask</option>
             <option value="warn">warn</option>
+            <option value="auto">auto</option>
             <option value="off">off</option>
           </select>
         </label>
@@ -253,10 +282,20 @@
       <label id="model-custom-wrap" hidden>Custom model name
         <input id="model-custom" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="model id">
       </label>
+      <details id="settings" hidden>
+        <summary>Settings <span id="settings-count"></span></summary>
+        <div id="settings-grid"></div>
+        <div class="settings-foot">
+          <span class="muted">Blank = the value from config.yaml (shown). Applies to the next book you start.</span>
+          <button type="button" id="settings-reset" class="secondary">Reset</button>
+        </div>
+      </details>
       <div class="actions">
         <button type="submit" id="start">Start book</button>
         <button type="button" id="resume" class="secondary" disabled>Resume book</button>
         <button type="button" id="stop" class="danger" disabled>Stop</button>
+        <button type="button" id="delete" class="secondary" disabled
+                title="Moves the book to output/web/.trash/">Delete book</button>
       </div>
       <div id="error"></div>
     </form>
@@ -265,6 +304,7 @@
       <h2 id="run-title">No book selected</h2>
       <span id="run-meta" class="muted"></span>
     </div>
+    <div id="notice" class="notice" hidden></div>
     <div id="chapter-list" class="chapters"></div>
 
     <div class="panes">
@@ -280,11 +320,15 @@
     <p class="muted small" id="q-kind"></p>
     <pre id="q-context"></pre>
     <p id="q-prompt"></p>
-    <input id="q-answer" autocomplete="off" enterkeyhint="send"
-           placeholder="Your answer, or leave empty for the suggestion">
+    <div id="q-fields" hidden></div>
+    <div id="q-choices" class="choices" hidden></div>
+    <textarea id="q-answer" rows="2" autocomplete="off" enterkeyhint="send"
+              placeholder="Your answer, or leave empty for the suggestion"></textarea>
     <div class="actions">
       <button id="q-send">Answer</button>
       <button id="q-default" class="secondary">Use the suggestion</button>
+      <button id="q-resume" class="secondary" hidden>Resume and answer</button>
+      <button id="q-close" class="secondary" hidden>Close</button>
     </div>
     <div id="q-error" class="muted small"></div>
   </div>
@@ -297,7 +341,9 @@ let selected = null;
 let source = null;
 let logLines = 0;
 let dialogFor = null;
+let pendingQuestion = null;   // the question the dialog shows (fields, choices)
 let busy = false;
+const dismissed = new Set();   // questions the user closed on purpose
 
 function showError(message) {
   const el = $('error');
@@ -408,10 +454,34 @@ function renderStatus(status) {
   const bits = [`${counts.planned} chapters`, `${counts.drafted} drafted`,
                 `${counts.edited} edited`];
   if (status.elapsed) bits.push(fmtElapsed(status.elapsed));
+  if (status.eta && status.eta.seconds > 0) {
+    // from how long the finished chapters took; a rough guide, not a promise
+    bits.push(`≈ ${fmtElapsed(status.eta.seconds)} left`
+      + (status.eta.scope === 'drafts' ? ' to draft' : ''));
+  }
   if (status.state === 'running' && status.last_output) {
     bits.push(`output ${fmtAgo(status.last_output)}`);
   }
+  const changed = Object.keys(status.settings || {});
+  if (changed.length) {
+    bits.push('settings: ' + changed.map((key) =>
+      `${settingLabel(key)} ${fmtSetting(status.settings[key])}`).join(', '));
+  }
   $('run-meta').textContent = bits.join(' · ');
+
+  const notice = $('notice');
+  if (status.state === 'interrupted') {
+    notice.textContent = 'This book stopped before finishing (the server '
+      + 'restarted, or it was closed). Press Resume book to continue from the '
+      + 'last saved step — any question it asked is asked again.';
+    notice.hidden = false;
+  } else if (status.state === 'finished' && status.exit_code) {
+    notice.textContent = `This book was stopped (exit code ${status.exit_code}). `
+      + 'Press Resume book to continue.';
+    notice.hidden = false;
+  } else {
+    notice.hidden = true;
+  }
 
   const chapters = $('chapter-list');
   chapters.innerHTML = '';
@@ -430,6 +500,13 @@ function renderStatus(status) {
     row.querySelector('.n').textContent = chapter.number;
     row.querySelector('.title').textContent = chapter.title || '';
     row.querySelector('.st').textContent = label;
+    if (chapter.note) {
+      // what the editor gave up on (full story: interim/diff_chapter_NN.md)
+      const note = document.createElement('span');
+      note.className = 'note';
+      note.textContent = chapter.note;
+      row.appendChild(note);
+    }
     chapters.appendChild(row);
   }
 
@@ -441,6 +518,14 @@ function renderStatus(status) {
     link.href = `/api/runs/${status.id}/file?path=${encodeURIComponent(file.path)}`;
     link.textContent = file.path;
     files.appendChild(link);
+  }
+  if ((status.files || []).some(f => f.path.startsWith('chapters/'))) {
+    const book = document.createElement('a');
+    book.href = `/api/runs/${status.id}/book`;
+    book.target = '_blank';
+    book.rel = 'noopener';
+    book.textContent = 'open book (live HTML)';
+    files.appendChild(book);
   }
   const epub = document.createElement('a');
   epub.href = '#';
@@ -455,6 +540,7 @@ function renderStatus(status) {
   // an interrupted run may have no outline yet: it still needs resuming
   $('resume').disabled = status.state === 'running' || status.state === 'new';
   $('stop').disabled = status.state !== 'running';
+  $('delete').disabled = status.state === 'running';
 }
 
 function appendLog(line) {
@@ -486,6 +572,7 @@ function rememberRun(runId) {
 }
 
 async function selectRun(runId) {
+  disarmDelete();        // an armed Delete must not carry over to another book
   selected = runId;
   rememberRun(runId);
   connectLog(runId);
@@ -502,8 +589,10 @@ async function refresh() {
       await checkQuestion();
     } else {
       setPill(null);
+      $('notice').hidden = true;
       $('resume').disabled = true;
       $('stop').disabled = true;
+      $('delete').disabled = true;
     }
   } catch (err) { showError(err.message); }
 }
@@ -512,22 +601,98 @@ async function checkQuestion() {
   if (!selected) return;
   const data = await api(`/api/runs/${selected}/question`);
   const dialog = $('question');
-  if (!data.pending) {
+  if (!data.pending || dismissed.has(data.pending.id)) {
     if (dialog.open) dialog.close();
     dialogFor = null;
     return;
   }
+  // live: the child that asked is running, so the answer will be read.
+  // Otherwise the run stopped with the question on disk: offer Resume.
+  const live = data.pending.live !== false;
   if (dialog.open && dialogFor === data.pending.id) return;
   dialogFor = data.pending.id;
-  $('q-kind').textContent = data.pending.kind === 'web_search'
-    ? 'Web search setup' : 'Seed review';
-  $('q-context').textContent = (data.context || []).join('\n');
-  $('q-prompt').textContent = data.pending.prompt.trim() || 'Your answer?';
+  const q = data.pending;
+  pendingQuestion = q;
+  const fields = q.fields || [];
+  const choices = q.choices || [];
+  $('q-kind').textContent = (live ? '' : 'Stopped, so this cannot be answered yet · ')
+    + (q.kind === 'web_search' ? 'Web search setup' : 'Seed review');
+  // what the answer depends on (e.g. the changes to keep or undo) beats the
+  // log tail, which cut a long list of changes off
+  $('q-context').textContent = q.details || (data.context || []).join('\n');
+  $('q-context').hidden = !$('q-context').textContent;
+  $('q-prompt').textContent = (q.prompt || '').trim() || 'Your answer?';
+
+  const box = $('q-fields');
+  box.innerHTML = '';
+  fields.forEach((field, i) => {
+    const wrap = document.createElement('label');
+    wrap.className = 'q-field';
+    const title = document.createElement('span');
+    title.className = 'q';
+    title.textContent = field.note ? field.question
+      : `${i + 1}/${fields.length - (fields.some(f => f.note) ? 1 : 0)}. ${field.question}`;
+    wrap.appendChild(title);
+    if (field.why) {
+      const why = document.createElement('span');
+      why.className = 'why muted';
+      why.textContent = `Why it matters: ${field.why}`;
+      wrap.appendChild(why);
+    }
+    const input = document.createElement('textarea');
+    input.rows = 2;
+    input.dataset.field = i;
+    input.disabled = !live;
+    input.placeholder = field.default ? `Suggestion (used if left empty): ${field.default}`
+      : field.note ? 'Optional' : 'Your answer';
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault(); sendForm();
+      }
+    });
+    wrap.appendChild(input);
+    box.appendChild(wrap);
+  });
+  box.hidden = !fields.length;
+
+  const menu = $('q-choices');
+  menu.innerHTML = '';
+  for (const [key, label] of choices) {
+    const button = document.createElement('button');
+    button.className = 'secondary' + (key === q.default ? ' default' : '');
+    button.textContent = label + (key === q.default ? ' (suggested)' : '');
+    button.disabled = !live;
+    button.onclick = () => sendAnswer(key);
+    menu.appendChild(button);
+  }
+  menu.hidden = !choices.length;
+
+  const plain = !fields.length && !choices.length;
+  $('q-answer').hidden = !plain;
   $('q-answer').value = '';
-  $('q-error').textContent = data.pending.default
-    ? `Suggestion: ${data.pending.default}` : '';
+  $('q-answer').disabled = !live;
+  $('q-answer').placeholder = live
+    ? 'Your answer, or leave empty for the suggestion'
+    : 'Resume the book to answer this';
+  $('q-send').hidden = !live || !!choices.length;
+  $('q-default').hidden = !live || !!choices.length;
+  $('q-default').textContent = fields.length ? 'Use all the suggestions' : 'Use the suggestion';
+  $('q-resume').hidden = live;
+  $('q-close').hidden = live;
+  $('q-error').textContent = live
+    ? (plain && q.default ? `Suggestion: ${q.default}` : '')
+    : 'The book is not running: resume it and the question is asked again.';
   if (!dialog.open) dialog.showModal();
-  $('q-answer').focus();
+  if (live) (box.querySelector('textarea') || (plain ? $('q-answer') : null))?.focus();
+}
+
+function formValues(empty) {
+  return Array.from($('q-fields').querySelectorAll('textarea'))
+    .map((input) => empty ? '' : input.value);
+}
+
+function sendForm(empty) {
+  sendAnswer(JSON.stringify(formValues(empty)));
 }
 
 async function sendAnswer(answer) {
@@ -598,8 +763,12 @@ $('new-run').onsubmit = async (event) => {
       model: modelChoice(),
       plan_only: $('plan-only').checked,
       seed_review: $('seed-review').value || null,
+      settings: settingsChoice(),
     };
     const started = await api('/api/runs', { method: 'POST', body: JSON.stringify(body) });
+    // The seed is now owned by the run; keep the box empty so the next book
+    // starts from nothing (and a stray second click cannot resubmit it).
+    $('seed').value = '';
     await selectRun(started.id);
   } catch (err) { showError(err.message); }
   finally { busy = false; }
@@ -622,21 +791,165 @@ $('stop').onclick = async () => {
   catch (err) { showError(err.message); }
 };
 
-$('q-send').onclick = () => sendAnswer($('q-answer').value);
-$('q-default').onclick = () => sendAnswer('');
+// Two taps: the page has no confirm() (and a phone mis-tap is easy), so the
+// first tap arms the button for a few seconds and the second deletes.
+let deleteArmed = null;
+function disarmDelete() {
+  clearTimeout(deleteArmed);
+  deleteArmed = null;
+  $('delete').textContent = 'Delete book';
+  $('delete').className = 'secondary';
+}
+$('delete').onclick = async () => {
+  if (!selected) return;
+  if (!deleteArmed) {
+    $('delete').textContent = 'Tap again to delete';
+    $('delete').className = 'danger';
+    deleteArmed = setTimeout(disarmDelete, 4000);
+    return;
+  }
+  disarmDelete();
+  const runId = selected;
+  try {
+    await api(`/api/runs/${runId}`, { method: 'DELETE' });
+    if (source) { source.close(); source = null; }
+    selected = null;
+    $('log').textContent = '';
+    $('run-title').textContent = 'No book selected';
+    $('run-meta').textContent = '';
+    $('chapter-list').innerHTML = '';
+    $('file-list').textContent = 'none yet';
+    const data = await api('/api/runs');
+    const next = (data.runs || [])[0];
+    if (next) await selectRun(next.id);
+    else { rememberRun(null); await refresh(); }
+  } catch (err) { showError(err.message); }
+};
+
+$('q-close').onclick = () => {
+  if (dialogFor) dismissed.add(dialogFor);
+  $('question').close();
+  dialogFor = null;
+};
+
+$('q-resume').onclick = async () => {
+  if (!selected) return;
+  if (dialogFor) dismissed.add(dialogFor);
+  $('question').close();
+  try {
+    await api('/api/runs', { method: 'POST', body: JSON.stringify({ resume: selected }) });
+    await selectRun(selected);
+  } catch (err) { showError(err.message); }
+};
+
+const hasFields = () => !!(pendingQuestion && (pendingQuestion.fields || []).length);
+$('q-send').onclick = () => hasFields() ? sendForm(false) : sendAnswer($('q-answer').value);
+$('q-default').onclick = () => hasFields() ? sendForm(true) : sendAnswer('');
+// a short answer: Enter sends, Shift+Enter is a new line (long answers go in
+// the form, where Enter is a new line and Ctrl/Cmd+Enter sends)
 $('q-answer').addEventListener('keydown', (event) => {
-  if (event.key === 'Enter') { event.preventDefault(); sendAnswer($('q-answer').value); }
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault(); sendAnswer($('q-answer').value);
+  }
 });
 
+// ---- per-book settings (overrides of config.yaml; checked by the server)
+let settingSpecs = [];
+
+function fmtSetting(value) {
+  if (value === true) return 'on';
+  if (value === false) return 'off';
+  if (value === '') return 'none';
+  return String(value);
+}
+
+function settingLabel(key) {
+  const spec = settingSpecs.find((s) => s.key === key);
+  return spec ? spec.label : key;
+}
+
+function settingInput(spec) {
+  const id = 'set-' + spec.key.replace(/\./g, '-');
+  const shown = spec.value === null || spec.value === undefined ? 'unset' : fmtSetting(spec.value);
+  let input;
+  if (spec.kind === 'bool' || spec.kind === 'choice') {
+    input = document.createElement('select');
+    const values = spec.kind === 'bool' ? [true, false] : spec.choices;
+    input.add(new Option(`from config (${shown})`, ''));
+    for (const value of values) input.add(new Option(fmtSetting(value), JSON.stringify(value)));
+  } else {
+    input = document.createElement('input');
+    input.type = 'number';
+    input.inputMode = spec.kind === 'int' ? 'numeric' : 'decimal';
+    input.step = spec.kind === 'int' ? '1' : 'any';
+    if (spec.min !== undefined) { input.min = spec.min; input.max = spec.max; }
+    input.placeholder = shown;
+  }
+  input.id = id;
+  input.dataset.key = spec.key;
+  input.dataset.kind = spec.kind;
+  input.addEventListener('input', markSettings);
+  input.addEventListener('change', markSettings);
+  const label = document.createElement('label');
+  label.htmlFor = id;
+  label.append(spec.label, input);
+  if (spec.help) {
+    const help = document.createElement('span');
+    help.className = 'muted small help';
+    help.textContent = spec.help;
+    label.append(help);
+  }
+  return label;
+}
+
+function renderSettings(specs) {
+  settingSpecs = specs || [];
+  const grid = $('settings-grid');
+  grid.innerHTML = '';
+  for (const spec of settingSpecs) grid.append(settingInput(spec));
+  $('settings').hidden = !settingSpecs.length;
+  markSettings();
+}
+
+function settingsChoice() {
+  const out = {};
+  for (const input of $('settings-grid').querySelectorAll('[data-key]')) {
+    if (input.value === '') continue;
+    out[input.dataset.key] = input.tagName === 'SELECT'
+      ? JSON.parse(input.value) : Number(input.value);
+  }
+  return out;
+}
+
+function markSettings() {
+  let n = 0;
+  for (const input of $('settings-grid').querySelectorAll('[data-key]')) {
+    const set = input.value !== '';
+    input.closest('label').classList.toggle('changed', set);
+    if (set) n += 1;
+  }
+  $('settings-count').textContent = n ? `(${n} changed)` : '';
+}
+
+$('settings-reset').onclick = () => {
+  for (const input of $('settings-grid').querySelectorAll('[data-key]')) input.value = '';
+  markSettings();
+};
+
 (async function init() {
+  // Browsers restore form field values on reload/back-navigation, which left
+  // the previous seed sitting in the box. This page is a launcher: the seed
+  // belongs to the run once started, so start every load empty.
+  $('seed').value = '';
   loadModels();
   try {
     const cfg = await api('/api/config');
     $('config').textContent = `${cfg.model || 'model from config'} · ${cfg.web_output}`;
     $('chapters').placeholder = `auto (${cfg.num_chapters})`;
     $('chapters').title = `From config: ${cfg.words_per_chapter} words per chapter`;
-    $('seed-review').value = ['ask', 'warn', 'off'].includes(cfg.seed_review)
+    $('seed-review').value = ['ask', 'warn', 'auto', 'off'].includes(cfg.seed_review)
       ? cfg.seed_review : '';
+    renderSettings(cfg.settings);
   } catch (err) { showError(err.message); }
 
   const wanted = new URLSearchParams(window.location.search).get('run');

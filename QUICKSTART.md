@@ -105,7 +105,7 @@ the Planner generates an outline if you don't provide one.
 | `--model NAME` | override `llm.model` |
 | `--out FILE` | override the output filename |
 | `--plan-only` | stop after the seed review and outline; rerun without it to write |
-| `--seed-review MODE` | `ask` (default), `warn` or `off` |
+| `--seed-review MODE` | `ask` (default), `warn`, `auto` or `off` |
 | `--no-resume` | start over (the old run is archived to `output/archive/`, not deleted) |
 
 ## Resuming
@@ -124,7 +124,8 @@ from the last saved chapter (the run's state lives in `output/state/`).
 
 The first thing a run does is check that your seed has enough story for the
 length you asked for. On a terminal it asks a few questions about gaps (Enter
-accepts the assumption shown) and, if the size doesn't fit, lets you keep it,
+accepts the assumption shown, `back` returns to the previous one); in the web
+GUI they arrive together as one form. If the size doesn't fit, lets you keep it,
 take the recommended size, choose your own, or stop and edit the seed. Use
 `--plan-only` to stop after the outline and read `output/interim/outline.md`
 before committing to the full run.
@@ -184,6 +185,10 @@ uv run --extra web uvicorn web.app:app --host 127.0.0.1 --port 8000
 # then open http://127.0.0.1:8000
 ```
 
+Its *Settings* panel overrides common `config.yaml` options (words per
+chapter, revision rounds, point of view, spelling, reasoning effort, reviewer max
+tokens, ...) for one book, without editing `config.yaml`.
+
 The whole thing also runs in Docker, with `config.yaml`, `seeds/` and `output/`
 on the host:
 
@@ -193,6 +198,10 @@ cp config.example.yaml config.yaml      # once; set llm.base_url
 docker compose up --build               # http://127.0.0.1:8000
 docker compose --profile search up      # ... plus SearXNG on :8888
 ```
+
+From a phone (same network or Tailscale): open `http://<host>:8000`. On an
+untrusted network add `BOOKWRITER_TOKEN=<secret>` and open
+`http://<host>:8000/?token=<secret>` once.
 
 See [Web GUI and Docker](README.md#web-gui-optional) in the README.
 

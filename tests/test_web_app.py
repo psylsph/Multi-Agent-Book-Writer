@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -64,6 +65,9 @@ def test_index_serves_the_page(web):
     response = web.client.get("/")
     assert response.status_code == 200
     assert "Multi-Agent Book Writer" in response.text
+    # long answers get a text area; a round's questions and menus their own UI
+    assert '<textarea id="q-answer"' in response.text
+    assert 'id="q-fields"' in response.text and 'id="q-choices"' in response.text
 
 
 def test_config_endpoint_reports_the_defaults(web):
@@ -241,6 +245,54 @@ def test_epub_needs_chapters(web):
     run_id = start(web)
     response = web.client.post(f"/api/runs/{run_id}/epub")
     assert response.status_code == 400
+    assert "chapter" in response.json()["detail"].lower()
+
+
+def test_epub_build_runs_the_script_from_the_repo_root(web, monkeypatch):
+    """'Build EPUB' must resolve make_epub.py in the repo root, not inside the
+    run's output directory (regression: the button reported
+    "[Errno 2] .../<run>/make_epub.py: No such file or directory")."""
+    run_id = start(web)
+    seen = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append((cmd, kwargs.get("cwd")))
+        return SimpleNamespace(returncode=1, stdout="", stderr="no chapters")
+
+    monkeypatch.setattr(web.module.subprocess, "run", fake_run)
+    response = web.client.post(f"/api/runs/{run_id}/epub")
+    assert response.status_code == 400
+    (cmd, cwd), = seen
+    assert Path(cmd[1]).parent == web.module.ROOT   # the script, not <run>/
+    assert cwd == str(web.module.ROOT)
+    assert cmd[-1] == str(web.module._job(run_id).directory / "config.yaml")
+
+
+def write_chapter(web, run_id, number, text):
+    job = web.module._job(run_id)
+    chapters = job.directory / "chapters"
+    chapters.mkdir(exist_ok=True)
+    (chapters / f"chapter_{number:02d}.md").write_text(text, encoding="utf-8")
+
+
+def test_the_book_page_renders_the_live_chapters_inline(web):
+    run_id = start(web)
+    write_chapter(web, run_id, 1, "# Chapter 1: The Fete\n\nRibbon cut.\n\n"
+                  "* * *\n\nRain.")
+    response = web.client.get(f"/api/runs/{run_id}/book")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["content-disposition"].startswith("inline")
+    text = response.text
+    assert "The Fete" in text and "Ribbon cut" in text
+    assert '<p class="scene-break">' in text      # it is the styled page,
+    assert "prefers-color-scheme: dark" in text   # the shared builder's
+
+
+def test_the_book_page_needs_chapters(web):
+    run_id = start(web)
+    response = web.client.get(f"/api/runs/{run_id}/book")
+    assert response.status_code == 404
     assert "chapter" in response.json()["detail"].lower()
 
 
@@ -444,18 +496,34 @@ class FakeModels:
         return self.payload
 
 
-def test_a_question_from_a_dead_run_is_not_shown(web):
-    """The question file stays after a crash, but nothing can consume the
-    answer, so the page must not pop a dead dialog (and answering is refused)."""
+def test_a_question_from_a_dead_run_is_offered_but_not_answerable(web):
+    """The question file stays after a crash. The page shows it with live:
+    false so it can offer Resume instead of a box that eats the answer."""
     run_id = start(web)
     job = web.module._job(run_id)
     asked = webanswer.write_question(job.control / "ask", ">", default="d")
 
-    assert web.client.get(f"/api/runs/{run_id}/question").json()["pending"] is None
+    pending = web.client.get(f"/api/runs/{run_id}/question").json()["pending"]
+    assert pending["id"] == asked["id"]
+    assert pending["live"] is False
     response = web.client.post(f"/api/runs/{run_id}/answer",
                                json={"id": asked["id"], "answer": "x"})
     assert response.status_code == 409
     assert webanswer.read_answer(job.control / "ask", asked["id"]) is None
+
+
+def test_starting_a_run_clears_a_stale_question(web):
+    """A resumed child asks again with a new id: the old files must go, or an
+    answer typed into the page would be silently discarded."""
+    run_id = start(web)
+    job = web.module._job(run_id)
+    webanswer.write_question(job.control / "ask", ">")
+    webanswer.write_answer(job.control / "ask", "abc", "old")
+
+    web.module._clear_questions(job)
+
+    assert webanswer.read_question(job.control / "ask") is None
+    assert not (job.control / "ask" / webanswer.ANSWER).exists()
 
 
 def test_models_lists_what_the_endpoint_offers(web, monkeypatch):
@@ -535,3 +603,341 @@ def test_resume_refreshes_the_endpoint_overrides(web, monkeypatch):
     assert updated["llm"]["base_url"] == "http://new:2"
     assert updated["web_search"]["searxng_url"] == "http://searxng:8080"
     assert updated["book"]["num_chapters"] == 7
+
+
+# ------------------------------------------------------------ secrets (regression)
+
+def test_a_runs_config_and_journal_are_not_downloadable(web):
+    """Regression: /file served anything inside the run directory, including
+    config.yaml - which held a literal llm.api_key - on a server with no auth."""
+    run_id = start(web)
+    for path in ("config.yaml", "job/job.json", "job/seed.md",
+                 "state/bible.json"):
+        response = web.client.get(f"/api/runs/{run_id}/file",
+                                  params={"path": path})
+        assert response.status_code == 404, path
+
+
+def test_a_literal_api_key_never_lands_in_a_run_config(web):
+    web.config.write_text(web.config.read_text().replace(
+        "  model: test-model\n", "  model: test-model\n  api_key: sk-SECRET\n"))
+    run_id = start(web)
+    text = (web.module._job(run_id).directory / "config.yaml").read_text()
+    assert "sk-SECRET" not in text and "test-model" in text
+
+
+def test_an_env_api_key_reference_is_kept(web):
+    web.config.write_text(web.config.read_text().replace(
+        "  model: test-model\n", '  model: test-model\n  api_key: "env:MY_KEY"\n'))
+    run_id = start(web)
+    text = (web.module._job(run_id).directory / "config.yaml").read_text()
+    assert "env:MY_KEY" in text
+
+
+def test_the_child_gets_the_literal_key_through_its_environment(web):
+    import yaml
+    web.config.write_text(web.config.read_text().replace(
+        "  model: test-model\n", "  model: test-model\n  api_key: sk-BASE\n"))
+    run_id = start(web)
+    job = web.module._job(run_id)
+    assert web.module._api_key_for(job) == "sk-BASE"
+    assert web.module._environment(job, "sk-BASE")["LLM_API_KEY"] == "sk-BASE"
+
+    # a run created before keys were kept out: its key moves to the env
+    config = job.directory / "config.yaml"
+    cfg = yaml.safe_load(config.read_text())
+    cfg["llm"]["api_key"] = "sk-OLD"
+    config.write_text(yaml.safe_dump(cfg))
+    assert web.module._api_key_for(job) == "sk-OLD"
+    assert "sk-OLD" not in config.read_text()
+
+
+def test_no_key_means_no_env_override(web, monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", "from-the-shell")
+    run_id = start(web)
+    job = web.module._job(run_id)
+    env = web.module._environment(job, web.module._api_key_for(job))
+    assert env["LLM_API_KEY"] == "from-the-shell"
+
+
+# ------------------------------------------------------------------- token
+
+def test_without_a_token_configured_nothing_is_checked(web, monkeypatch):
+    monkeypatch.delenv(web.module.TOKEN_ENV, raising=False)
+    assert web.client.get("/api/runs").status_code == 200
+
+
+def test_a_token_is_required_when_configured(web, monkeypatch):
+    monkeypatch.setenv(web.module.TOKEN_ENV, "s3cret")
+    assert web.client.get("/api/runs").status_code == 401
+    assert web.client.get("/").status_code == 401
+    assert web.client.get("/api/runs",
+                          headers={"X-Bookwriter-Token": "wrong"}).status_code == 401
+    assert web.client.get("/api/runs",
+                          headers={"X-Bookwriter-Token": "s3cret"}).status_code == 200
+
+
+def test_a_token_visit_sets_a_cookie_for_the_page(web, monkeypatch):
+    monkeypatch.setenv(web.module.TOKEN_ENV, "s3cret")
+    response = web.client.get("/", params={"token": "s3cret"})
+    assert response.status_code == 200
+    assert web.client.cookies.get(web.module.TOKEN_COOKIE) == "s3cret"
+    assert web.client.get("/api/runs").status_code == 200   # the cookie works
+
+
+# ---------------------------------------------------------- live log drain
+
+def test_the_event_stream_waits_for_the_last_lines(web, monkeypatch):
+    """Regression: `done` was sent as soon as the child exited, up to one
+    tailer poll before the last lines (the run summary) reached the buffer."""
+    run_id = start(web)
+    job = web.module._job(run_id)
+    (job.control / "exit.json").write_text(
+        json.dumps({"exit_code": 0, "finished": job.started + 1}))
+    monkeypatch.setattr(web.module, "_running", lambda pid, rid: False)
+    job.append("working")
+    job.drained.clear()                     # a tailer is still copying
+
+    def finish_later():
+        time.sleep(0.3)
+        job.append("PIPELINE COMPLETE!")
+        job.drained.set()
+
+    threading.Thread(target=finish_later, daemon=True).start()
+    text = web.client.get(f"/api/runs/{run_id}/events").text
+    assert "PIPELINE COMPLETE!" in text
+    assert text.rstrip().endswith("data: finished")     # not "interrupted"
+
+
+# ------------------------------------------------ progress: estimate and notes
+
+def _chapter(n, drafted_at=None, edited_at=None):
+    return {"number": n, "drafted": drafted_at is not None,
+            "edited": edited_at is not None, "drafted_at": drafted_at,
+            "edited_at": edited_at}
+
+
+def test_no_estimate_until_two_chapters_are_timed(web):
+    eta = web.module._eta
+    assert eta([_chapter(1, 100.0), _chapter(2), _chapter(3)]) is None
+    assert eta([_chapter(1, 100.0, 200.0), _chapter(2, 300.0, 400.0)]) is None
+
+
+def test_estimate_while_drafting_covers_the_drafts_only(web):
+    chapters = [_chapter(1, 100.0), _chapter(2, 160.0), _chapter(3, 220.0),
+                _chapter(4), _chapter(5)]
+    assert web.module._eta(chapters) == {"seconds": 120, "scope": "drafts"}
+
+
+def test_estimate_while_editing_uses_the_edit_rate(web):
+    chapters = [_chapter(n, 10.0 * n, 1000.0 + 30 * n) for n in (1, 2)]
+    chapters += [_chapter(n, 10.0 * n) for n in (3, 4)]
+    assert web.module._eta(chapters) == {"seconds": 60, "scope": "book"}
+
+
+def test_review_as_you_go_counts_whole_chapters(web):
+    # each chapter drafted then edited before the next: 100 s a chapter
+    chapters = [_chapter(1, 0.0, 50.0), _chapter(2, 100.0, 150.0),
+                _chapter(3, 200.0, 250.0), _chapter(4), _chapter(5)]
+    assert web.module._eta(chapters) == {"seconds": 200, "scope": "book"}
+
+
+def test_a_long_pause_does_not_swamp_the_estimate(web):
+    """A run stopped overnight and resumed: the median ignores that gap."""
+    times = [0.0, 60.0, 120.0, 50000.0, 50060.0]
+    chapters = [_chapter(n + 1, t) for n, t in enumerate(times)]
+    chapters += [_chapter(6), _chapter(7)]
+    assert web.module._eta(chapters)["seconds"] == 120
+
+
+def test_status_carries_notes_and_an_estimate_only_while_running(
+        web, monkeypatch):
+    run_id = start(web)
+    job = web.module._job(run_id)
+    state = job.directory / "state"
+    state.mkdir()
+    (state / "outline.json").write_text(json.dumps(
+        [{"number": n, "title": f"C{n}"} for n in (1, 2, 3)]))
+    (state / "drafts.json").write_text(json.dumps({"1": "a", "2": "b"}))
+    (state / "chapter_notes.json").write_text(json.dumps({
+        "1": {"drafted_at": 100.0, "note": "polish rejected (shortened)"},
+        "2": {"drafted_at": 160.0}}))
+    status = web.client.get(f"/api/runs/{run_id}").json()
+    assert status["chapters"][0]["note"] == "polish rejected (shortened)"
+    assert status["chapters"][1]["note"] == ""
+    assert status["eta"] is None                    # not running
+    job.pid = 4242
+    monkeypatch.setattr(web.module, "_running", lambda pid, run_id: True)
+    status = web.client.get(f"/api/runs/{run_id}").json()
+    assert status["eta"] == {"seconds": 60, "scope": "drafts"}
+
+
+def test_a_form_question_is_relayed_whole(web, monkeypatch):
+    run_id = start(web)
+    job = web.module._job(run_id)
+    job.pid = 4242
+    monkeypatch.setattr(web.module, "_running", lambda pid, run_id: True)
+    asked = webanswer.write_question(
+        job.control / "ask", "Answer what you can", kind="seed_questions",
+        fields=[{"question": "Who?", "why": "", "default": "Aria"}],
+        details="+ a line")
+    pending = web.client.get(f"/api/runs/{run_id}/question").json()["pending"]
+    assert pending["fields"][0]["question"] == "Who?"
+    assert pending["details"] == "+ a line"
+    web.client.post(f"/api/runs/{run_id}/answer",
+                    json={"id": asked["id"], "answer": json.dumps(["Tom"])})
+    assert json.loads(webanswer.read_answer(job.control / "ask",
+                                            asked["id"])) == ["Tom"]
+
+
+def test_the_seed_review_and_search_files_are_listed_and_served(web):
+    run_id = start(web)
+    job = web.module._job(run_id)
+    interim = job.directory / "interim"
+    interim.mkdir()
+    (interim / "seed_review.md").write_text("# Seed review")
+    (interim / "seed_round_01_rejected.md").write_text("a lost round")
+    (interim / "search_chapter_03.md").write_text("# Web fact-check")
+    (interim / "outline.md").write_text("not listed")
+    paths = {f["path"] for f in web.client.get(f"/api/runs/{run_id}").json()["files"]}
+    assert {"interim/seed_review.md", "interim/seed_round_01_rejected.md",
+            "interim/search_chapter_03.md"} <= paths
+    assert "interim/outline.md" not in paths
+    url = f"/api/runs/{run_id}/file"
+    assert web.client.get(url, params={"path": "interim/seed_review.md"}).text \
+        == "# Seed review"
+    assert web.client.get(url, params={"path": "interim/outline.md"}
+                          ).status_code == 404
+
+
+# ------------------------------------------------------------------ deleting
+
+def test_deleting_a_book_moves_it_to_the_trash(web):
+    run_id = start(web)
+    job = web.module._job(run_id)
+    (job.directory / "draft.md").write_text("the book")
+    response = web.client.delete(f"/api/runs/{run_id}")
+    assert response.status_code == 200
+    moved = web.module.BASE_DIR / ".trash" / run_id
+    assert (moved / "draft.md").read_text() == "the book"      # not erased
+    assert not job.directory.exists()
+    assert run_id not in {r["id"] for r in web.client.get("/api/runs").json()["runs"]}
+    assert web.client.get(f"/api/runs/{run_id}").status_code == 404
+
+
+def test_a_running_book_cannot_be_deleted(web, monkeypatch):
+    run_id = start(web)
+    web.module._job(run_id).pid = 4242
+    monkeypatch.setattr(web.module, "_running", lambda pid, run_id: True)
+    assert web.client.delete(f"/api/runs/{run_id}").status_code == 409
+    assert web.module._job(run_id).directory.exists()
+
+
+def test_the_trash_is_not_a_run(web):
+    run_id = start(web)
+    web.client.delete(f"/api/runs/{run_id}")
+    assert web.client.get("/api/runs/.trash").status_code in (400, 404)
+    assert web.client.delete("/api/runs/.trash").status_code in (400, 404, 405)
+    assert (web.module.BASE_DIR / ".trash" / run_id).exists()
+
+
+def test_deleting_the_same_id_twice_keeps_both(web):
+    run_id = start(web)
+    web.client.delete(f"/api/runs/{run_id}")
+    (web.module.BASE_DIR / run_id / "job").mkdir(parents=True)   # same id again
+    (web.module.BASE_DIR / run_id / "config.yaml").write_text("{}")
+    assert web.client.delete(f"/api/runs/{run_id}").status_code == 200
+    trash = web.module.BASE_DIR / ".trash"
+    assert {p.name for p in trash.iterdir()} == {run_id, f"{run_id}-1"}
+
+
+# ------------------------------------------------- per-book settings
+
+def _run_config(job):
+    import yaml
+    return yaml.safe_load((job.directory / "config.yaml").read_text())
+
+
+def test_the_config_endpoint_lists_the_settings_with_their_values(web):
+    settings = {s["key"]: s for s in web.client.get("/api/config").json()["settings"]}
+    assert settings["book.words_per_chapter"]["value"] == 900      # config.yaml
+    assert settings["book.revision_rounds"]["value"] == 2          # a default
+    assert settings["book.style.pov"]["value"] == "third"
+    assert settings["agents.reviewer.enabled"]["value"] is True
+    assert settings["llm.reasoning_effort"]["value"] == "none"
+    assert settings["book.style.pov"]["choices"] == ["third", "first"]
+    assert settings["book.revision_rounds"]["min"] == 0
+
+
+def test_settings_from_the_page_go_into_the_runs_config_only(web):
+    start(web, settings={
+        "book.words_per_chapter": "1600", "book.word_count_tolerance": 0.7,
+        "book.review_as_you_go": True, "agents.reviewer.max_tokens": 12000,
+        "agents.reviewer.reasoning_effort": "none", "book.style.pov": "first",
+        "book.revision_rounds": None, "llm.max_tokens": ""})   # blank: config's
+    job, options = web.spawned[0]
+    config = _run_config(job)
+    assert config["book"]["words_per_chapter"] == 1600
+    assert config["book"]["word_count_tolerance"] == 0.7
+    assert config["book"]["review_as_you_go"] is True
+    assert config["book"]["style"] == {"pov": "first"}
+    assert config["agents"]["reviewer"] == {"max_tokens": 12000,
+                                            "reasoning_effort": ""}
+    assert "revision_rounds" not in config["book"]
+    assert "max_tokens" not in (config.get("llm") or {})
+    assert config["book"]["seed_review"] == "ask"          # the rest is kept
+    assert "agents" not in (web.module._base_config())     # config.yaml untouched
+    assert options["settings"]["book.words_per_chapter"] == 1600
+    status = web.client.get(f"/api/runs/{job.id}").json()
+    assert status["settings"]["book.style.pov"] == "first"
+
+
+def test_the_spelling_setting_is_off_or_british(web):
+    settings = {s["key"]: s for s in web.client.get("/api/config").json()["settings"]}
+    assert settings["book.style.spelling"]["value"] == "off"
+    assert settings["book.style.spelling"]["choices"] == ["off", "british"]
+    start(web, settings={"book.style.spelling": "british"})
+    assert _run_config(web.spawned[0][0])["book"]["style"] == {"spelling": "british"}
+    assert web.module._clean_settings({"book.style.spelling": "off"}) == {
+        "book.style.spelling": ""}
+
+
+@pytest.mark.parametrize("settings, message", [
+    ({"llm.api_key": "x"}, "cannot be set"),
+    ({"output.directory": "/etc"}, "cannot be set"),
+    ({"book.revision_rounds": 99}, "between"),
+    ({"book.revision_rounds": 1.5}, "not a valid value"),
+    ({"book.review_as_you_go": "yes"}, "not a valid value"),
+    ({"book.style.pov": "second"}, "not a valid value"),
+    ({"agents.writer.temperature": "hot"}, "not a valid value"),
+])
+def test_bad_settings_are_refused_before_anything_is_written(web, settings,
+                                                            message):
+    response = web.client.post("/api/runs", json={"seed": SEED,
+                                                  "settings": settings})
+    assert response.status_code == 400 and message in response.text
+    assert not web.spawned
+    assert not (web.root / "web").exists() or not any((web.root / "web").iterdir())
+
+
+def test_a_merged_setting_keeps_its_sections_siblings(web):
+    web.config.write_text(web.config.read_text() + "  style:\n    banned_phrases: [\"coil of\"]\n"
+                          "agents:\n  reviewer:\n    enabled: true\n")
+    start(web, settings={"book.style.pov": "first",
+                         "agents.reviewer.max_tokens": 9000})
+    config = _run_config(web.spawned[0][0])
+    assert config["book"]["style"] == {"banned_phrases": ["coil of"], "pov": "first"}
+    assert config["agents"]["reviewer"] == {"enabled": True, "max_tokens": 9000}
+
+
+def test_every_setting_is_a_known_config_key():
+    from shared.config_schema import AGENT_KEYS, AGENTS, KNOWN_KEYS, STYLE_KEYS
+    from web.app import SETTINGS
+    for key, *_ in SETTINGS:
+        parts = key.split(".")
+        if parts[0] == "agents":
+            assert parts[1] in AGENTS and parts[2] in AGENT_KEYS | {"temperature"}
+        elif parts[:2] == ["book", "style"]:
+            assert parts[2] in STYLE_KEYS
+        else:
+            assert parts[1] in KNOWN_KEYS[parts[0]], key

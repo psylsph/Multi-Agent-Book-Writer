@@ -9,6 +9,7 @@ connection after N chat calls, and can stream its replies (SSE).
 import json
 
 import requests
+from shared.prompts import unfence
 
 CHAPTER_WORDS = 130
 
@@ -95,7 +96,7 @@ class FakeLLM:
                 ("Analyse this chapter", "extractor"),
                 ("Review this chapter draft", "reviewer"),
                 ("You are revising", "reviser"),
-                ("professional fiction editor", "polisher"),
+                ("Copy-edit Chapter", "polisher"),
                 ("Write Chapter", "writer")):
             if phrase in prompt:
                 return kind
@@ -115,7 +116,7 @@ class FakeLLM:
                 "recommended": {"chapters": 2, "words_per_chapter": 100},
                 "to_fill_requested": [], "questions": []})
         if kind == "expand":                 # the brief, plus one new section
-            brief = prompt.split('THE BRIEF\n"""', 1)[1].rsplit('"""', 1)[0]
+            brief = unfence(prompt, "brief")
             return brief + "\n## Subplot\n\nThe ferry sinks on the way back.\n"
         if kind == "suggest":
             return json.dumps({"chapters": 2, "reason": "short"})
@@ -142,8 +143,7 @@ class FakeLLM:
         if kind == "reviser":
             return words(CHAPTER_WORDS, "revised")
         if kind == "polisher":
-            start = prompt.index("## Chapter")
-            return prompt[start:prompt.index("\n\nReturn ONLY")]
+            return unfence(prompt, "chapter")
         if kind == "writer":
             number = int(prompt.split("Write Chapter ")[1].split()[0])
             if number == self.refuse_chapter:

@@ -22,16 +22,19 @@ from agents.seed_review import run_seed_review
 from agents.researcher import run_researcher
 from agents.writer import refresh_state, run_writer
 from agents.editor import finalize_book, run_editor, save_book
-from shared import llm_client, runlog, web_search, webanswer
+from shared import envfile, llm_client, runlog, web_search, webanswer
+from shared.llm_utils import strip_chapter_length
 from shared.context import get_context, reset_context, update_context
 from shared.llm_client import EndpointUnavailable, agent_enabled, \
     get_config, load_config, preflight
-from shared.output import (archive_previous_run, interim_dir,
+from shared.output import (ArchiveError, archive_previous_run, interim_dir,
                            interim_enabled, save_interim, save_interim_json)
 from shared.resume import StateWriteError, has_resume, load_plan, \
-    load_state, summarize_for_log
+    load_state, save_state, summarize_for_log
 
 EXAMPLE_SEED = Path(__file__).resolve().parent / "seeds" / "example_seed.md"
+# the file docker compose reads; the CLI reads it too (API keys, endpoints)
+ENV_FILE = Path(__file__).resolve().parent / ".env"
 
 
 def positive_int(value):
@@ -68,8 +71,10 @@ def resolve_seed_text(args):
 
 
 def _norm_seed(text):
-    """Seed text normalised for comparison (line endings, outer blanks)."""
-    return (text or "").replace("\r\n", "\n").strip()
+    """Seed text normalised for comparison (line endings, outer blanks, and
+    chapter lengths, which the run strips from the seed it keeps)."""
+    text = (text or "").replace("\r\n", "\n")
+    return strip_chapter_length(text)[0].strip()
 
 
 def check_resume(args, state, num_chapters):
@@ -161,6 +166,10 @@ def _hydrate_resume(state):
         update_context("final", dict(state["final"]))
     if state.get("unreviewed"):
         update_context("unreviewed", set(state["unreviewed"]))
+    if state.get("unrefreshed"):
+        update_context("unrefreshed", set(state["unrefreshed"]))
+    if state.get("chapter_notes"):
+        update_context("chapter_notes", dict(state["chapter_notes"]))
 
 
 @contextlib.contextmanager
@@ -204,6 +213,11 @@ def run_interleaved():
     next chapter is written. Later chapters therefore build on the corrected
     earlier ones instead of on unreviewed drafts. Stops at the first chapter
     that can't be drafted; a rerun resumes from there.
+
+    A chapter is marked "unrefreshed" (saved state) BEFORE it is edited and
+    cleared only once its state has been re-extracted, so a crash between
+    the edit and the refresh is caught on resume instead of leaving every
+    later chapter built on the draft's facts.
     """
     chapters = get_context("chapters")
     for chapter in chapters:
@@ -215,10 +229,35 @@ def run_interleaved():
                   "Rerun the same command to resume from this chapter.")
             return
         if n in (get_context("final") or {}):
+            if n in _unrefreshed():
+                # edited in an earlier run that stopped before the refresh
+                print(f"[PIPELINE] Chapter {n} was edited but its story "
+                      "state was not refreshed; refreshing it now.")
+                _refresh(n)
             continue  # edited (and refreshed) in an earlier run
+        _mark_unrefreshed(n, True)
         run_editor(only=n)
-        refresh_state(n)
+        _refresh(n)
     finalize_book(get_context("final"), reuse_path=True)
+
+
+def _unrefreshed():
+    return get_context("unrefreshed") or set()
+
+
+def _mark_unrefreshed(n, pending):
+    """Add/remove chapter n in the saved 'unrefreshed' set."""
+    numbers = set(_unrefreshed())
+    (numbers.add if pending else numbers.discard)(n)
+    update_context("unrefreshed", numbers)
+    save_state("unrefreshed", sorted(numbers))
+
+
+def _refresh(n):
+    """Re-extract chapter n's state from its edited text; clear the mark only
+    when that worked (a failed extraction keeps it, so a rerun tries again)."""
+    if refresh_state(n):
+        _mark_unrefreshed(n, False)
 
 
 def _incomplete_chapters(context, editor_on):
@@ -268,7 +307,7 @@ def _seed_review(run):
                            clarifications=run.clarifications)
     run.seed_text = plan["seed"]          # the master seed from here on
     if plan["stop"]:
-        if plan["seed"] != original:
+        if _norm_seed(plan["seed"]) != _norm_seed(original):
             print("\n[PIPELINE] Stopped at the seed review. The expanded seed "
                   "is saved as the master seed (output/seed.md). Rerun the "
                   "same command to continue reviewing it, or add "
@@ -427,7 +466,14 @@ def run_pipeline(seed_text, num_chapters=None, resuming=False, state=None,
         # the size the seed review settled when the run began
         run.num_chapters = num_chapters or apply_plan(load_plan())
     else:
-        archived = archive_previous_run()  # moved aside, never deleted
+        try:
+            archived = archive_previous_run()  # moved aside, never deleted
+        except ArchiveError as e:
+            print(f"[PIPELINE] Not starting: {e}.")
+            print("[PIPELINE] Fix the permissions (or move it aside by hand), "
+                  "then rerun; nothing has been written.")
+            _report_stats(phases)
+            return 1
         if archived:
             print(f"[PIPELINE] Previous run archived to {archived}/")
     if interim_enabled():
@@ -487,10 +533,13 @@ def main():
     parser.add_argument("--plan-only", action="store_true",
                         help="stop after the seed review, story bible and "
                              "outline; rerun without it to write the book")
-    parser.add_argument("--seed-review", choices=("ask", "warn", "off"),
+    parser.add_argument("--seed-review",
+                        choices=("ask", "warn", "auto", "off"),
                         help="override book.seed_review: ask questions and "
-                             "choose the size (ask), only report (warn), or "
-                             "skip the check (off)")
+                             "choose the size (ask), only report (warn), "
+                             "accept every suggestion and keep reviewing "
+                             "until nothing is asked (auto), or skip the "
+                             "check (off)")
     parser.add_argument("--no-resume", action="store_true",
                         help="ignore any saved run and restart "
                              "from the seed prompt")
@@ -498,6 +547,8 @@ def main():
 
     num_chapters = args.chapters if args.chapters is not None else args.n
 
+    # .env first: it can carry the endpoint overrides load_config applies
+    envfile.load(ENV_FILE)
     # Load config, apply CLI overrides
     try:
         cfg = load_config(args.config)

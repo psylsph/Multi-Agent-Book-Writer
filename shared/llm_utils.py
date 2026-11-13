@@ -157,10 +157,13 @@ def extract_seed_extras(seed_text):
                     stripped = line.strip()
                     if _HEADING_RE.match(stripped):
                         continue
-                    if re.match(r"^(?:[-*\u2022]\s*|\d+[.)]\s*)", stripped):
-                        text = re.sub(
-                            r"^(?:[-*\u2022]\s*|\d+[.)]\s*)", "", stripped
-                        ).strip()
+                    if _BOLD_HEADING_RE.match(stripped):
+                        # "**Plot Roadmap:**" on a line of its own is a
+                        # heading written in bold: the constraints end here.
+                        # Read on, a seed's whole outline became constraints.
+                        break
+                    if _BULLET_RE.match(stripped):
+                        text = _BULLET_RE.sub("", stripped, count=1).strip()
                         if text:
                             constraints.append(text)
                     elif constraints and stripped:
@@ -176,6 +179,11 @@ _CHAR_LINE_RE = re.compile(
     r"(?:\((.+?)\))?\s*[-\u2013\u2014:]\s*(.+)$"
 )
 _HEADING_RE = re.compile(r"^#{1,6}\s")
+# A bullet marker. A '*' followed by another '*' opens bold text, not a bullet
+# ("**POV** - single" lost its first star and stopped matching anything).
+_BULLET_RE = re.compile(r"^(?:[-\u2022]\s*|\*(?!\*)\s*|\d+[.)]\s*)")
+# A line that is nothing but bold text: "**Plot Roadmap:**", "**Chapter 1**".
+_BOLD_HEADING_RE = re.compile(r"^\*\*[^*]+\*\*:?$|^__[^_]+__:?$")
 
 
 _ALIAS_INTRO = r"(?:a\.?k\.?a\.?|known as|called|nicknamed|goes by|also called)"
@@ -310,3 +318,137 @@ def render_bible(bible):
                      + "\n".join(f"- {c.get('question', '')} {c['answer']}"
                                   for c in clarifications))
     return "\n\n".join(parts) if parts else "(no story bible available)"
+
+
+# A per-chapter length the author states: "1,500-1,700 words per chapter",
+# "2000 words a chapter", "chapters of about 1,800 words". Parsed here, not
+# by the seed reviewer: the model's JSON has one number per field, so a RANGE
+# came back as null and the configured words_per_chapter (2000) silently
+# replaced the author's 1,500-1,700.
+_NUM = r"(\d{1,2}(?:[,.]\d{3})+|\d{3,5}|\d{1,2}(?:\.\d)?\s*k)"
+_SPAN = (_NUM + r"(?:\s*(?:-|–|—|to)\s*" + _NUM + r")?")
+_CHAPTER_WORDS_RES = (
+    # "1,500-1,700 words per chapter", "2000 words a chapter"
+    re.compile(_SPAN + r"\s*words?\s*(?:per|a|each|every|for each|/)\s*chapter",
+               re.I),
+    # "chapters of about 1,800 words"
+    re.compile(r"chapters?\s+(?:of|at|around|about|averaging|of about|of around)"
+               r"\s+(?:about\s+|around\s+|roughly\s+|~\s*)?" + _SPAN + r"\s*words",
+               re.I),
+    # "Words per chapter: 1,500", "word count per chapter - 2000"
+    re.compile(r"words?\s*(?:count\s*)?(?:per|a|each|every)\s*chapter\s*"
+               r"(?:\*\*)?\s*[:=\-\u2013\u2014]?\s*(?:\*\*)?\s*"
+               r"(?:about\s+|around\s+|roughly\s+|~\s*)?" + _SPAN, re.I),
+    # "each chapter should be around 2,000 words", "chapter length: 1500 words"
+    re.compile(r"\b(?:each|every|per|a)\s+chapter\b[^.\n]{0,40}?\b" + _SPAN
+               + r"\s*words", re.I),
+    re.compile(r"\bchapter\s+length\b[^.\n]{0,20}?" + _SPAN, re.I),
+)
+
+
+def _words_number(text):
+    t = text.lower().replace(" ", "")
+    if t.endswith("k"):
+        return int(float(t[:-1]) * 1000)
+    return int(re.sub(r"[,.]", "", t))
+
+
+def stated_chapter_words(seed_text):
+    """Every per-chapter length the seed states, as [(low, high), ...] in
+    order (low == high for a single number). Implausible numbers (outside
+    300-20,000) are skipped."""
+    found = []
+    for pattern in _CHAPTER_WORDS_RES:
+        for m in pattern.finditer(seed_text or ""):
+            low = _words_number(m.group(1))
+            high = _words_number(m.group(2)) if m.group(2) else low
+            low, high = min(low, high), max(low, high)
+            if 300 <= low and high <= 20000:
+                found.append((m.start(), (low, high)))
+    out = []
+    for _, span in sorted(found):
+        if span not in out:
+            out.append(span)
+    return out
+
+
+# A length statement inside brackets: "(about 2,000 words)" in an outline line.
+_BRACKETED_RE = re.compile(r"\s*[(\[][^()\[\]\n]{0,60}?\b" + _NUM
+                           + r"[^()\[\]\n]{0,40}?\bwords?\b[^()\[\]\n]{0,30}[)\]]",
+                           re.I)
+# The sentence pieces of one line (the split keeps the punctuation).
+_PIECE_RE = re.compile(r"[^.!?;\n]*(?:[.!?;]+|$)")
+# A leading label: "* **Word Count & Depth:**", "- Length:", "1. Style -"
+_LABEL_RE = re.compile(
+    r"^(\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*[^*\n]{1,60}\*\*\s*:?|"
+    r"__[^_\n]{1,60}__\s*:?|[A-Za-z][^:\n]{0,40}:(?!\d)))\s*")
+
+
+# An outline entry ("- Chapter 3: Title - ..."): a bracketed word count on it
+# is that chapter's length
+_OUTLINE_ENTRY_RE = re.compile(r"^\s*(?:[-*+]\s+|#+\s*)?(?:\*\*)?chapter\s+\w+",
+                               re.I)
+
+
+def _states_chapter_length(text):
+    return any(p.search(text) for p in _CHAPTER_WORDS_RES)
+
+
+def strip_chapter_length(seed_text):
+    """The seed with every per-chapter length statement taken out, and the
+    pieces removed. Returns (text, removed).
+
+    The book's size is settled once (book.words_per_chapter, the page's
+    settings, the seed review) and handed to every stage as a number. Left in
+    the seed, a length rode into every prompt through the bible, the author
+    notes and the writer's brief - in one run as "1,500-1,700 words per
+    chapter. 2,000 words per chapter." against a 2,000-word target. Read it
+    first (stated_chapter_words), then strip it.
+
+    The whole sentence that states the length goes (a sentence is cut at
+    . ! ? ;), and a bracketed "(about 2,000 words)" goes on its own. A line's
+    label ("**Word Count & Depth:**") stays when other sentences follow it; a
+    line with nothing left goes. Total book lengths ("about 50,000 words")
+    are not per-chapter and stay."""
+    removed = []
+    out = []
+    for line in (seed_text or "").split("\n"):
+        outline = bool(_OUTLINE_ENTRY_RE.match(line))
+        if not (_states_chapter_length(line)
+                or outline and _BRACKETED_RE.search(line)):
+            out.append(line)
+            continue
+
+        def cut_bracket(m):
+            if outline or _states_chapter_length(m.group(0)):
+                removed.append(m.group(0).strip())
+                return ""
+            return m.group(0)
+
+        line = _BRACKETED_RE.sub(cut_bracket, line)
+        if not _states_chapter_length(line):
+            out.append(line.rstrip())
+            continue
+        label_m = _LABEL_RE.match(line)
+        label = label_m.group(1).rstrip() if label_m else ""
+        body = line[label_m.end():] if label_m else line
+        kept = []
+        for piece in _PIECE_RE.findall(body):
+            if not piece.strip():
+                continue
+            if _states_chapter_length(piece) or (
+                    label and _states_chapter_length(label + " " + piece)
+                    and not kept):
+                removed.append(piece.strip())
+            else:
+                kept.append(piece.strip())
+        if kept:
+            out.append((label + " " if label else "") + " ".join(kept))
+        elif label and not _states_chapter_length(label) and not re.search(
+                r"\b(?:length|word)", label, re.I):
+            out.append(label.rstrip())       # a label for something else
+        # else: the line was only the length; drop it
+    text = "\n".join(out)
+    if (seed_text or "").endswith("\n") and not text.endswith("\n"):
+        text += "\n"
+    return text, removed

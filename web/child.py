@@ -22,11 +22,9 @@ from pathlib import Path
 
 def record(path, exit_code):
     """Write the exit status atomically (a kill mid-write must not corrupt it)."""
-    path = Path(path)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps({"exit_code": exit_code, "finished": time.time()}),
-                   encoding="utf-8")
-    os.replace(tmp, path)
+    from shared.output import atomic_write_text
+    atomic_write_text(Path(path), json.dumps(
+        {"exit_code": exit_code, "finished": time.time()}))
 
 
 def main(argv):

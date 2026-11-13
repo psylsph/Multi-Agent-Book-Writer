@@ -16,6 +16,9 @@ DEFAULTS = {
     "chronology": {},  # chapter number -> structured story state
     "final": {},       # chapter number -> edited body (no heading)
     "unreviewed": set(),  # chapters finished without a readable review
+    "unrefreshed": set(), # edited chapters whose story state still comes from
+                          # the draft (review as you go; see main.py)
+    "chapter_notes": {},  # chapter number -> {drafted_at, edited_at, note}
     "output_path": "", # where the final book was actually written
 }
 

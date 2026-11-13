@@ -464,3 +464,236 @@ def test_a_non_json_200_body_is_malformed(tmp_path, monkeypatch):
                         lambda *a, **k: Html(None))
     with pytest.raises(RuntimeError, match="Malformed response"):
         generate("hi", agent="writer")
+
+
+# ------------------------------------------------- sampler controls
+
+class _OkResp:
+    status_code = 200
+    text = ""
+
+    def json(self):
+        return {"choices": [{"message": {"content": "ok"},
+                             "finish_reason": "stop"}]}
+
+
+def _capture_sampling_payload(tmp_path, monkeypatch, sampling_yaml=""):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "llm:\n"
+        '  base_url: "http://localhost:9"\n'
+        '  model: "test-model"\n'
+        "  timeout: 1\n"
+        "  retries: 0\n" + sampling_yaml)
+    load_config(cfg)
+    seen = {}
+
+    def fake_post(url, json=None, **kwargs):
+        seen.update(json or {})
+        return _OkResp()
+
+    monkeypatch.setattr(llm_client.requests, "post", fake_post)
+    assert generate("hi", agent="writer") == "ok"
+    return seen
+
+
+def test_sampling_fields_are_sent_verbatim_when_configured(tmp_path,
+                                                           monkeypatch):
+    seen = _capture_sampling_payload(
+        tmp_path, monkeypatch,
+        "  sampling:\n"
+        "    min_p: 0.1\n"
+        "    top_k: 64\n"
+        "    dry_multiplier: 0.8\n"
+        "    dry_allowed_length: 3\n")
+    assert seen["min_p"] == 0.1
+    assert seen["top_k"] == 64
+    assert seen["dry_multiplier"] == 0.8
+    assert seen["dry_allowed_length"] == 3
+
+
+def test_no_sampling_fields_are_sent_by_default(tmp_path, monkeypatch):
+    """OpenAI rejects unknown request fields: the block must stay opt-in."""
+    seen = _capture_sampling_payload(tmp_path, monkeypatch)
+    for key in ("min_p", "top_k", "dry_multiplier", "repeat_penalty"):
+        assert key not in seen
+
+
+def test_unknown_sampling_keys_are_ignored(tmp_path, monkeypatch, capsys):
+    seen = _capture_sampling_payload(tmp_path, monkeypatch,
+                            "  sampling:\n"
+                            "    minp: 0.1\n")
+    assert "minp" not in seen
+    assert "unknown key 'llm.sampling.minp'" in capsys.readouterr().out
+
+
+# ------------------------------------------------- reasoning leaks (regression)
+
+def test_a_bare_closing_think_tag_drops_the_reasoning(tmp_path, monkeypatch):
+    """Qwen3-style templates put <think> in the PROMPT, so a server that does
+    not split reasoning out returns "reasoning </think> prose": only the
+    opening-tag forms were stripped, and the thinking reached the chapter."""
+    _use_config(tmp_path)
+    _post_recorder(monkeypatch, [("Let me plan the scene...\n</think>\n\n"
+                                  "The door opened.", "stop")])
+    assert generate("hi") == "The door opened."
+
+
+def test_strip_reasoning_shapes():
+    strip = llm_client.strip_reasoning
+    assert strip("<think>x</think>Prose.") == "Prose."
+    assert strip("Prose.<think>cut off") == "Prose."
+    assert strip("plan</think>Prose.") == "Prose."
+    assert strip("Plain prose.") == "Plain prose."
+
+
+# --------------------------------------------- per-agent sampling (regression)
+
+def _sampling_config(tmp_path, agents=""):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text('llm:\n  base_url: "http://h:1"\n  sampling:\n'
+                   "    min_p: 0.1\n    repeat_penalty: 1.05\n" + agents)
+    load_config(cfg)
+
+
+def test_global_sampling_reaches_prose_agents(tmp_path, monkeypatch):
+    _sampling_config(tmp_path)
+    calls = _post_recorder(monkeypatch, [("ok", "stop")])
+    generate("hi", agent="writer")
+    assert calls[0][1]["min_p"] == 0.1
+
+
+@pytest.mark.parametrize("agent", ["extractor", "verifier", "reviewer"])
+def test_global_sampling_is_not_sent_to_json_agents(tmp_path, monkeypatch,
+                                                    agent):
+    """Repetition penalties fight JSON's repeated keys; an unreadable reply
+    there loses continuity facts or a review."""
+    _sampling_config(tmp_path)
+    calls = _post_recorder(monkeypatch, [("{}", "stop")])
+    generate("hi", agent=agent)
+    assert "min_p" not in calls[0][1] and "repeat_penalty" not in calls[0][1]
+
+
+def test_global_sampling_is_not_sent_to_json_mode_calls(tmp_path, monkeypatch):
+    _sampling_config(tmp_path)
+    calls = _post_recorder(monkeypatch, [("{}", "stop")])
+    generate("hi", agent="architect", json_mode=True)
+    assert "min_p" not in calls[0][1]
+
+
+def test_agent_sampling_replaces_the_global_block(tmp_path, monkeypatch):
+    _sampling_config(tmp_path, "agents:\n  reviewer:\n    sampling:\n"
+                               "      top_k: 20\n  writer:\n    sampling: {}\n")
+    calls = _post_recorder(monkeypatch, [("{}", "stop"), ("ok", "stop")])
+    generate("hi", agent="reviewer")
+    generate("hi", agent="writer")
+    assert calls[0][1]["top_k"] == 20 and "min_p" not in calls[0][1]
+    assert "min_p" not in calls[1][1]                 # {} sends nothing
+
+
+@pytest.mark.parametrize("agent", ["editor", "seed_reviewer"])
+def test_copy_agents_get_no_repetition_penalties(tmp_path, monkeypatch, agent):
+    """Regression: with DRY on, the polish fused and garbled words the draft
+    did not have ("againsther", "unremarkableRE"): reproducing the chapter in
+    the context is what a repetition penalty punishes."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text('llm:\n  base_url: "http://h:1"\n  sampling:\n'
+                   "    min_p: 0.1\n    top_k: 64\n    repeat_penalty: 1.05\n"
+                   "    dry_multiplier: 0.8\n    dry_allowed_length: 3\n"
+                   "    xtc_probability: 0.5\n    presence_penalty: 0.2\n")
+    load_config(cfg)
+    calls = _post_recorder(monkeypatch, [("ok", "stop"), ("ok", "stop")])
+    generate("hi", agent=agent)
+    generate("hi", agent="writer")
+    sent, writer = calls[0][1], calls[1][1]
+    assert sent["min_p"] == 0.1 and sent["top_k"] == 64       # truncation kept
+    for key in ("repeat_penalty", "dry_multiplier", "dry_allowed_length",
+                "xtc_probability", "presence_penalty"):
+        assert key not in sent
+        assert key in writer                                  # prose keeps them
+
+
+def test_a_copy_agent_can_still_opt_into_penalties(tmp_path, monkeypatch):
+    _sampling_config(tmp_path, "agents:\n  editor:\n    sampling:\n"
+                               "      repeat_penalty: 1.1\n")
+    calls = _post_recorder(monkeypatch, [("ok", "stop")])
+    generate("hi", agent="editor")
+    assert calls[0][1]["repeat_penalty"] == 1.1
+
+
+# ------------------------------------------------ streaming deadline
+
+class _Stream:
+    status_code = 200
+    text = ""
+
+    def __init__(self, lines):
+        self._lines = lines
+
+    def iter_lines(self, decode_unicode=True):
+        yield from self._lines
+
+    def close(self):
+        pass
+
+
+def test_a_stream_past_its_deadline_is_cut_and_retried(tmp_path, monkeypatch):
+    """llm.timeout only bounds each chunk, so a looping model trickling tokens
+    never timed out; stream_max_seconds caps the whole reply."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text('llm:\n  base_url: "http://h:1"\n  stream: true\n'
+                   "  retries: 1\n  stream_max_seconds: 5\n")
+    load_config(cfg)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(llm_client.time, "time", lambda: clock["now"])
+    monkeypatch.setattr(llm_client.time, "sleep", lambda s: None)
+
+    def looping():
+        for _ in range(100):
+            clock["now"] += 1
+            yield 'data: {"choices": [{"delta": {"content": "la "}}]}'
+
+    good = ['data: {"choices": [{"delta": {"content": "Done."}, '
+            '"finish_reason": "stop"}]}', "data: [DONE]"]
+    replies = [_Stream(looping()), _Stream(good)]
+    monkeypatch.setattr(llm_client.requests, "post",
+                        lambda *a, **k: replies.pop(0))
+    assert generate("hi") == "Done."
+    assert replies == []
+
+
+def test_a_stream_without_a_deadline_is_read_to_the_end(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text('llm:\n  base_url: "http://h:1"\n  stream: true\n')
+    load_config(cfg)
+    lines = ['data: {"choices": [{"delta": {"content": "a "}}]}'] * 50 + [
+        'data: {"choices": [{"delta": {"content": "b"}, '
+        '"finish_reason": "stop"}]}']
+    monkeypatch.setattr(llm_client.requests, "post",
+                        lambda *a, **k: _Stream(lines))
+    assert generate("hi").endswith("a b")
+
+
+def test_endpoint_variables_override_the_config_for_the_cli(tmp_path, monkeypatch,
+                                                            capsys):
+    # the GUI already did this for its runs; the CLI on a host whose SearXNG
+    # lives on a Docker network needs the same switch
+    from shared import llm_client
+    path = tmp_path / "config.yaml"
+    path.write_text('llm:\n  base_url: "http://localhost:8080"\n'
+                    'web_search:\n  searxng_url: "http://localhost:8888"\n')
+    monkeypatch.setenv("BOOKWRITER_SEARXNG_URL", "http://172.18.0.2:8080")
+    cfg = llm_client.load_config(path)
+    assert cfg["web_search"]["searxng_url"] == "http://172.18.0.2:8080"
+    assert cfg["llm"]["base_url"] == "http://localhost:8080"     # unset: kept
+    assert "from BOOKWRITER_SEARXNG_URL" in capsys.readouterr().out
+    monkeypatch.setenv("BOOKWRITER_LLM_BASE_URL", " http://gpu:8080 ")
+    assert llm_client.load_config(path)["llm"]["base_url"] == "http://gpu:8080"
+
+
+def test_endpoint_variables_unset_change_nothing(tmp_path):
+    from shared import llm_client
+    path = tmp_path / "config.yaml"
+    path.write_text('web_search:\n  searxng_url: "http://localhost:8888"\n')
+    assert llm_client.load_config(path)["web_search"]["searxng_url"] \
+        == "http://localhost:8888"

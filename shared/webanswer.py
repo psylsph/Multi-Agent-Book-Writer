@@ -8,6 +8,10 @@ BOOKWRITER_ASK_DIR, and install_if_enabled() swaps both prompts for a file
 handshake:
 
     <dir>/question.json   {id, kind, prompt, default, asked_at}
+                          + optional details (text to read before answering),
+                          choices ([[key, label]]: a menu, shown as buttons),
+                          fields ([{question, why, default, note?}]: a form;
+                          its answer is a JSON list, one string per field)
     <dir>/answer.json     {id, answer, at}
 
 The child writes a question and polls for the matching answer (removing both
@@ -63,7 +67,8 @@ def new_id():
     return uuid.uuid4().hex
 
 
-def write_question(directory, prompt, default="", kind="seed_review", qid=None):
+def write_question(directory, prompt, default="", kind="seed_review", qid=None,
+                   details="", choices=(), fields=()):
     """Publish a question and return it (a dict)."""
     question = {
         "id": qid or new_id(),
@@ -72,6 +77,12 @@ def write_question(directory, prompt, default="", kind="seed_review", qid=None):
         "default": default or "",
         "asked_at": time.time(),
     }
+    if details:
+        question["details"] = str(details)
+    if choices:
+        question["choices"] = [[str(k), str(label)] for k, label in choices]
+    if fields:
+        question["fields"] = [dict(f) for f in fields]
     _write_json(question_path(directory), question)
     return question
 
@@ -117,7 +128,7 @@ def read_answer(directory, qid):
 
 
 def ask(prompt, default="", directory=None, timeout=None, poll=0.25,
-        kind="seed_review"):
+        kind="seed_review", **extra):
     """Ask one question and block until it is answered.
 
     Raises EOFError on timeout, like a closed stdin: callers already handle
@@ -128,7 +139,7 @@ def ask(prompt, default="", directory=None, timeout=None, poll=0.25,
         raise ValueError(f"{ENV_DIR} is not set")
     if timeout is None:
         timeout = float(os.environ.get(ENV_TIMEOUT) or DEFAULT_TIMEOUT)
-    question = write_question(directory, prompt, default, kind)
+    question = write_question(directory, prompt, default, kind, **extra)
     deadline = time.time() + timeout
     while time.time() < deadline:
         answer = read_answer(directory, question["id"])
@@ -140,6 +151,20 @@ def ask(prompt, default="", directory=None, timeout=None, poll=0.25,
     except OSError:
         pass
     raise EOFError(f"no answer to {question['id']} within {timeout:.0f}s")
+
+
+def form_replies(answer, count):
+    """A form's answer (a JSON list of strings) as exactly `count` strings.
+    Anything else - a plain string from an old page, broken JSON - fills
+    the first field and leaves the rest to their defaults."""
+    try:
+        replies = json.loads(answer)
+    except ValueError:
+        replies = [answer]
+    if not isinstance(replies, list):
+        replies = [replies]
+    replies = ["" if r is None else str(r) for r in replies][:count]
+    return replies + [""] * (count - len(replies))
 
 
 def _yes(text):
@@ -159,15 +184,25 @@ def install(directory=None, timeout=None):
     from agents import seed_review
     from shared import web_search
 
-    def seed_ask(prompt, default=""):     # seed_review._ask(question, default)
+    def seed_ask(prompt, default="", details="", choices=()):
         try:
             answer = ask(prompt, default=default, directory=directory,
-                         timeout=timeout, kind="seed_review")
+                         timeout=timeout, kind="seed_review",
+                         details=details, choices=choices)
         except EOFError:                   # what a closed stdin does: take
             print()                        # the default and stop asking
             seed_review._INPUT["closed"] = True
             return default
         return answer or default           # an empty answer means Enter
+
+    def seed_form(fields):                 # seed_review._ask_form(fields)
+        try:
+            answer = ask("Answer what you can; an empty field takes its "
+                         "suggestion.", directory=directory, timeout=timeout,
+                         kind="seed_questions", fields=fields)
+        except EOFError:
+            return None
+        return form_replies(answer, len(fields))
 
     def web_ask(prompt):                   # web_search._ask(question) -> bool
         try:
@@ -177,6 +212,7 @@ def install(directory=None, timeout=None):
             return False
 
     seed_review._ask = seed_ask
+    seed_review._ask_form = seed_form
     seed_review._INPUT["closed"] = False   # a browser is there to answer
     # without a tty, mode() downgrades seed_review: ask to warn and the whole
     # review loop disappears -- say a terminal is present and answer via file

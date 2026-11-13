@@ -45,7 +45,8 @@ documenting) when it ships.
   the Docker image. Shipped: see the README. Runs survive a server restart
   (on-disk journal, interrupt/resume, optional auto-resume) and the page is
   phone-first. No seed *editing* yet beyond the text box and the review's own
-  questions, one book at a time, and no authentication.
+  questions, one book at a time, and no accounts (an optional shared
+  token, `BOOKWRITER_TOKEN`, is the only access control).
 - [ ] **Character-voice conditioning** per point-of-view chapter.
 
 ### Engineering
@@ -204,6 +205,23 @@ writer (the costly error); a wrong *no* only drops a good fact.
   revision the chapter did not need. Edits are rolled back if they make things
   worse, and `diff_chapter_NN.md` shows what happened, but a wasted round costs
   time. `book.review_checks` can switch checks off.
+- **Point of view is first-vs-third only.** The person check counts I/me/my in
+  the narration (third person unless `book.style.pov` or the seed says first).
+  It cannot tell a slip from a deliberate first-person interlude (a letter, a
+  diary) and does not notice a change of *whose* head a third-person chapter
+  is in.
+- **Scene checks are narrow.** The cast check needs a "Couples:" /
+  "Characters:" field in the outline and only sees bible characters acting
+  (three or more verbs); someone who sits silently in the room, or a minor
+  character not in the bible, is not caught. The place check knows UK
+  counties only: a wrong town, city or country is not caught. British
+  spelling covers a fixed word list.
+- **Over-long chapters are tightened once, not held to length.** Some models
+  overshoot the brief on every chapter (1,803-3,189 words for 1,400-1,700).
+  One tightening pass (`book.max_length_ratio`) is the most the editor will
+  try: the check that it kept every scene is the character names plus the
+  reviewer's outline check, and a harder cut risks summarising. With the
+  reviewer off, only the name check guards a tightening.
 
 ### Robustness
 - **Crash window in review-as-you-go.** A crash between a chapter's edit and the

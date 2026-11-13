@@ -92,6 +92,8 @@ def test_state_round_trip(tmp_path):
     save_state("chronology", {1: {"present": [], "events": []}})
     save_state("final", {1: "edited one"})
     save_state("unreviewed", [1])
+    save_state("unrefreshed", [1])
+    save_state("chapter_notes", {1: {"drafted_at": 5.0, "note": "polish rejected"}})
     assert (out / "state" / "drafts.json").exists()
     assert has_resume()
     state = load_state()
@@ -102,6 +104,9 @@ def test_state_round_trip(tmp_path):
     assert state["summaries"] == {1: "sum"}
     assert state["final"] == {1: "edited one"}
     assert state["unreviewed"] == {1}
+    assert state["unrefreshed"] == {1}
+    assert state["chapter_notes"] == {1: {"drafted_at": 5.0,
+                                          "note": "polish rejected"}}
     assert load_plan()["words_per_chapter"] == 900
 
 
@@ -168,3 +173,25 @@ def test_concurrent_writes_of_one_file_do_not_collide(tmp_path, monkeypatch):
         t.join()
     assert not errors
     assert [p.name for p in (out / "interim").iterdir()] == ["same.md"]
+
+
+def test_chapter_notes_merge_and_survive_a_resume(tmp_path):
+    """The notes are written one field at a time (drafted, then edited); a
+    resumed run must add to them, not start the dict again."""
+    import main as pipeline
+    from shared.context import context, reset_context
+    from shared.resume import note_chapter
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f'output:\n  directory: "{tmp_path / "out"}"\n')
+    load_config(cfg)
+    reset_context()
+    note_chapter(1, drafted_at=10.0)
+    note_chapter(1, edited_at=20.0, note="")
+    assert load_state()["chapter_notes"] == {
+        1: {"drafted_at": 10.0, "edited_at": 20.0, "note": ""}}
+
+    reset_context()                                   # a new process
+    pipeline._hydrate_resume(load_state())
+    note_chapter(2, drafted_at=30.0)
+    assert set(context["chapter_notes"]) == {1, 2}
+    assert load_state()["chapter_notes"][1]["edited_at"] == 20.0

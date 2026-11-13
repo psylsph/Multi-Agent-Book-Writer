@@ -10,6 +10,7 @@ from shared.consistency import (lint_book, phrase_repeats,
                                 repeated_phrases_in_book)
 from shared.context import context, reset_context, update_context
 from shared.llm_client import EndpointUnavailable, load_config
+from shared.prompts import unfence
 
 BIBLE = {"title": "T", "world": "A marsh", "constraints": [
     "Close third person, past tense, one POV per chapter.",
@@ -203,8 +204,7 @@ def _editor_run(tmp_path, monkeypatch, book="", revise=None, only=3):
         prompts.append(prompt)
         if "You are revising" in prompt:
             return revise if revise is not None else _words(120, "fresh")
-        start = prompt.index("## Chapter")
-        return prompt[start:prompt.index("\n\nReturn ONLY")]
+        return unfence(prompt, "chapter")
 
     monkeypatch.setattr(editor, "generate_prose", prose)
     editor.run_editor(only=only)
@@ -256,3 +256,32 @@ def test_rejected_revision_is_recorded_in_the_diff(tmp_path, monkeypatch):
     _editor_run(tmp_path, monkeypatch, revise=shrunk)
     diff = (tmp_path / "out" / "interim" / "diff_chapter_03.md").read_text()
     assert "revision discarded (too short)" in diff
+
+
+def test_an_issue_quoting_text_not_in_the_chapter_is_dropped(tmp_path,
+                                                             monkeypatch):
+    """The reviewer invented evidence: deterministic code checks the model."""
+    payload = {"verdict": "revise", "issues": [
+        {"type": "constraint", "description":
+         'The draft says "Aria shouted at the burning sky" in present tense.',
+         "fix": "x"},
+        {"type": "constraint", "description":
+         'The draft says "A draft." which is too short to be a chapter.'},
+        {"type": "outline_gap", "description":
+         "The chapter never shows Aria finding the letter.", "fix": "y"}]}
+    (verdict, issues), _ = _review(tmp_path, monkeypatch, payload)
+    assert [i["type"] for i in issues] == ["constraint", "outline_gap"]
+    assert verdict == "revise"
+
+
+def test_quotes_found():
+    draft = "The rain came down on the harbour wall all night."
+    assert reviewer.quotes_found('It says "came down on the harbour wall".',
+                                 draft)
+    assert not reviewer.quotes_found('It says "the moon rose over the hills".',
+                                     draft)
+    assert reviewer.quotes_found("No quotes at all.", draft)
+    # one real quote is enough (the other may quote the outline)
+    assert reviewer.quotes_found('"came down on the harbour wall" but the '
+                                 'outline says "she leaves the island first"',
+                                 draft)

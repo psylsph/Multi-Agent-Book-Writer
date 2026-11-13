@@ -27,7 +27,9 @@ from shared.llm_client import get_config
 
 def atomic_write_text(path, text):
     """Write text so a crash mid-write can never leave a truncated file:
-    write a sibling temp file, then atomically swap it into place."""
+    write a sibling temp file, flush it to disk, then atomically swap it into
+    place. The fsync matters after a power cut: without it some filesystems
+    can commit the rename before the data and leave an empty file."""
     path = Path(path)
     # a temp name unique to this process and thread: two writers of the same
     # file (threads, two runs) must not truncate each other's temp file.
@@ -35,7 +37,10 @@ def atomic_write_text(path, text):
     tmp = path.with_name(
         f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
-        tmp.write_text(text, encoding="utf-8")
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -64,6 +69,15 @@ def clear_interim():
         shutil.rmtree(path, ignore_errors=True)
 
 
+class ArchiveError(OSError):
+    """The previous run's state/ or chapters/ could not be moved aside."""
+
+
+# Left in place, these would mix into the new run: an old final.json could be
+# resumed as this book's chapters, an old chapter file shipped in its EPUB.
+MUST_ARCHIVE = ("state", "chapters")
+
+
 def archive_previous_run():
     """Move the previous run out of the way WITHOUT deleting it.
 
@@ -72,7 +86,9 @@ def archive_previous_run():
     <output dir>/archive/<timestamp>/, so hours of generated text are never
     lost to a restart. Returns the archive path, or None when there was
     nothing to archive. Never raises on a missing file; a failed move is
-    reported and the run continues.
+    reported and the run continues - except for state/ and chapters/
+    (MUST_ARCHIVE): if either stays behind, ArchiveError is raised so the
+    fresh run does not start on top of the old one.
     """
     cfg = get_config()["output"]
     out = Path(cfg["directory"])
@@ -90,11 +106,18 @@ def archive_previous_run():
         suffix += 1
         dest = out / "archive" / f"{time.strftime('%Y%m%d-%H%M%S')}-{suffix}"
     dest.mkdir(parents=True)
+    stuck = []
     for path in present:
         try:
             shutil.move(str(path), str(dest / path.name))
         except OSError as e:
             print(f"[PIPELINE] Could not archive {path}: {e}")
+            if path.name in MUST_ARCHIVE and path.exists():
+                stuck.append(str(path))
+    if stuck:
+        raise ArchiveError(
+            f"could not move the previous run's {', '.join(stuck)} into "
+            f"{dest}/, and a fresh run would mix with it")
     return dest
 
 
@@ -116,7 +139,7 @@ def save_chapter(number, title, text):
         return None
     try:
         path = chapters_dir() / f"chapter_{number:02d}.md"
-        atomic_write_text(path, f"# Chapter {number}: {title}\n\n{text}\n")
+        atomic_write_text(path, render_chapter(number, title, text) + "\n")
         print(f"[CHAPTER] Saved {path}")
         return path
     except OSError as e:

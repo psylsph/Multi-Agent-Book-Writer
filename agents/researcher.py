@@ -134,8 +134,14 @@ Return ONLY a JSON array: [{{"claim": "a checkable statement", "query": "a short
 
     number = 0
     for claim in claims:
+        # Parallel takes the claim itself as the search objective; it must
+        # pass the same screen as the query (character names, banned terms),
+        # or the query - already screened - stands in for it.
+        objective = claim.get("claim") or claim["query"]
+        if web_search.blocked_term(objective, forbidden):
+            objective = claim["query"]
         try:
-            found = web_search.search(claim["query"])
+            found = web_search.search(claim["query"], objective=objective)
         except web_search.SearchError as e:
             print(f"[RESEARCHER] Search failed for '{claim['query']}': {e}")
             found = []
@@ -175,6 +181,12 @@ Use "unclear" unless a result directly addresses the claim. Return ONLY a JSON a
     return web_search.format_verified(verdicts)
 
 
+def outline_text(chapters):
+    """One line per chapter: number, title and summary."""
+    return "\n".join(f"{c['number']}. {c['title']}: "
+                     f"{c.get('summary') or '(no summary)'}" for c in chapters)
+
+
 def run_researcher():
     """
     Create a lore brief for every planned chapter.
@@ -189,7 +201,11 @@ def run_researcher():
         return
 
     research_data = dict(context.get("research", {}))
-    system = prompts.with_bible(prompts.RESEARCHER, bible)
+    # The whole outline, in the system message: "what to set up or pay off
+    # for later" was asked of a researcher that saw only this chapter. It is
+    # the same for every brief, so prompt caching keeps it cheap.
+    system = (prompts.with_bible(prompts.RESEARCHER, bible)
+              + "\n\nBOOK OUTLINE\n" + outline_text(chapters))
     seen_queries = []  # searched so far, across chapters (skip repeats)
     use_web = web_search.enabled() and web_search.is_available()
     forbidden = web_search.banned_terms() if use_web else []
@@ -201,8 +217,9 @@ def run_researcher():
             print(f"[RESEARCHER] {len(names)} full character name(s) are "
                   "blocked from search queries.")
     if use_web:
-        print("[RESEARCHER] Web fact-checking is on "
-              f"({web_search.settings()['searxng_url']}).")
+        where = [web_search.settings()["searxng_url"] if name == "searxng"
+                 else name for name in web_search.providers()]
+        print(f"[RESEARCHER] Web fact-checking is on ({', '.join(where)}).")
     for chapter in chapters:
         n, title = chapter["number"], chapter["title"]
         if research_data.get(n):
@@ -228,7 +245,7 @@ VERIFIED REAL-WORLD FACTS (each checked against web search results; the quotes a
 
         prompt = f"""You are a story lore keeper preparing a writing brief for ONE chapter of a novel.
 
-CHAPTER TO BRIEF
+CHAPTER TO BRIEF (the outline of the whole book is above)
 Chapter {n}: {title}
 {chapter.get('summary', '')}
 {web_block}
